@@ -286,6 +286,11 @@ class Companion(QtWidgets.QWidget):
         catalog_layout.addWidget(note)
         for key, (title, package) in tools.CATALOG.items():
             catalog_layout.addWidget(self.local_button('Install ' + title, lambda k=key: tools.install(k)))
+        catalog_layout.addWidget(self.local_button(
+            'Open Microsoft Word/Excel (free one-month trial)', tools.microsoft_365_trial))
+        trial_note = label('Microsoft 365 opens in your browser. Microsoft account and trial eligibility required; a paid subscription follows unless canceled. Word and Excel desktop apps are not available for Linux.', 'muted')
+        trial_note.setWordWrap(True)
+        catalog_layout.addWidget(trial_note)
         catalog_layout.addStretch()
         self.tabs.addTab(catalog, 'Apps')
         controls = QtWidgets.QWidget()

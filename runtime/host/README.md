@@ -174,6 +174,10 @@ remote service receives the user's connection addresses.
 The small app catalog installs allowlisted packages using apt or dnf and the
 image's passwordless sudo. Installations last for the current disposable session;
 repository availability and host resource limits still apply.
+The Apps tab also links to the Microsoft 365 free one-month trial for Word/Excel.
+This opens Microsoft's signup page in the browser; it does not install desktop
+Office on Linux. A Microsoft account and trial eligibility are required, and
+the trial continues as a paid subscription unless canceled.
 
 ### Account defaults and storage browsing
 
