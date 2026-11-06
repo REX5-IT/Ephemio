@@ -41,6 +41,31 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         return (await response.json())['ticket']
 
+    async def test_thumbnail_owner_expiry_and_cache(self):
+        path = '/v1/desktops/' + self.sid + '/thumbnail'
+        with patch.object(service, 'command', AsyncMock(return_value=(0, 'anBlZw=='))) as capture:
+            denied = await self.client.get(path, json={'owner': secrets.token_hex(16)})
+            self.assertEqual(denied.status, 403)
+            capture.assert_not_awaited()
+            for _ in range(2):
+                response = await self.client.get(path, json={'owner': self.owner})
+                self.assertEqual(response.status, 200)
+                self.assertEqual((await response.json())['image'], 'anBlZw==')
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+            self.assertEqual(capture.await_count, 1)
+            self.worker.thumbnails[self.sid] = (time.monotonic() - 16, 'old')
+            self.assertEqual((await self.client.get(path, json={'owner': self.owner})).status, 200)
+            self.assertEqual(capture.await_count, 2)
+            self.worker.save('UPDATE desktops SET deadline=? WHERE id=?', (int(time.time()) - 1, self.sid))
+            self.assertEqual((await self.client.get(path, json={'owner': self.owner})).status, 403)
+            self.assertEqual(capture.await_count, 2)
+
+    async def test_thumbnail_capture_failure(self):
+        with patch.object(service, 'command', AsyncMock(side_effect=RuntimeError('Capture unavailable'))):
+            response = await self.client.get('/v1/desktops/' + self.sid + '/thumbnail', json={'owner': self.owner})
+            self.assertGreaterEqual(response.status, 500)
+            self.assertNotIn(self.sid, self.worker.thumbnails)
+
     async def test_single_use_and_owner_binding(self):
         denied = await self.client.post('/v1/desktops/' + self.sid + '/tickets', json={'owner': secrets.token_hex(16), 'login': self.login})
         self.assertEqual(denied.status, 403)

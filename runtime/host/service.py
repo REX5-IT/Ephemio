@@ -72,9 +72,17 @@ class Worker:
         self.db.commit()
         if 'profile' not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
             self.save("ALTER TABLE desktops ADD COLUMN profile TEXT NOT NULL DEFAULT 'ubuntu-kde'")
+        self.db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value REAL NOT NULL)')
+        self.limits = {'slots': config['slots'], 'max_session_seconds': 3600, 'admit_memory_gib': 5,
+                       'admit_disk_gib': 20, 'pressure_memory_gib': 2, 'pressure_disk_gib': 15,
+                       'storage_limit_gib': 5, 'cpu_limit': 2, 'memory_gib': 3, 'shm_gib': 1,
+                       'pids_limit': 512, 'startup_timeout_seconds': 300}
+        self.limits.update({r['key']: r['value'] for r in self.db.execute('SELECT * FROM settings')})
         self.ready = False
         self.lock = asyncio.Lock()
         self.last_usage = 0
+        self.thumbnails = {}
+        self.thumbnail_lock = asyncio.Lock()
 
     def get(self, sid):
         return self.db.execute('SELECT * FROM desktops WHERE id=?', (sid,)).fetchone()
@@ -95,10 +103,29 @@ class Worker:
     async def rpc(self, request):
         data = await request.json() if request.can_read_body else {}
         path = request.path
+        if path == '/v1/settings':
+            if request.method == 'POST':
+                values = data.get('values', {})
+                if not isinstance(values, dict) or set(values) != set(self.limits):
+                    raise web.HTTPBadRequest(text='Supply all supported settings.')
+                for key, value in values.items():
+                    if type(value) not in (int, float) or not 0 < value <= 1000000:
+                        raise web.HTTPBadRequest(text='Settings must be positive numbers.')
+                    if key in ('slots', 'pids_limit', 'max_session_seconds', 'startup_timeout_seconds') and int(value) != value:
+                        raise web.HTTPBadRequest(text='Expected an integer.')
+                if values['pressure_memory_gib'] >= values['admit_memory_gib'] or values['pressure_disk_gib'] >= values['admit_disk_gib']:
+                    raise web.HTTPBadRequest(text='Pressure thresholds must be below admission thresholds.')
+                async with self.lock:
+                    with self.db:
+                        self.db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', values.items())
+                    self.limits.update(values)
+            elif request.method != 'GET':
+                raise web.HTTPMethodNotAllowed(request.method, ['GET', 'POST'])
+            return web.json_response(self.limits)
         if path == '/v1/health':
             count = self.db.execute("SELECT COUNT(*) FROM desktops WHERE state!='deleted'").fetchone()[0]
-            return web.json_response({'host_id': self.c['host_id'], 'ready': self.ready, 'slots': self.c['slots'], 'used': count,
-                                      'profiles': list(self.profiles()),
+            return web.json_response({'host_id': self.c['host_id'], 'ready': self.ready, 'slots': self.limits['slots'], 'used': count,
+                                      'profiles': list(self.profiles()), 'limits': self.limits,
                                       'memory_available': memory_available(), 'disk_available': shutil.disk_usage(self.c['state']).free})
         if path == '/v1/snapshot':
             return web.json_response([self.public(r) for r in self.db.execute('SELECT * FROM desktops')])
@@ -128,11 +155,61 @@ class Worker:
             if not grant or grant['expires'] <= time.time() or grant['desktop'] != data.get('id') or not self.active(row):
                 raise web.HTTPForbidden(text='Desktop access has expired. Reopen it from Ephemio.')
             return web.json_response({'port': row['port'], 'expires': grant['expires']})
-        match = re.fullmatch(r'/v1/desktops/([a-f0-9]{32})(/tickets)?', path)
+        match = re.fullmatch(r'/v1/desktops/([a-f0-9]{32})(/tickets|/thumbnail|/inspect|/pause|/resume)?', path)
         if not match:
             raise web.HTTPNotFound()
         sid, ticket_path = match.groups()
         row = self.get(sid)
+        if ticket_path in ('/inspect', '/pause', '/resume'):
+            if not row:
+                raise web.HTTPNotFound()
+            if ticket_path == '/inspect':
+                if request.method != 'GET':
+                    raise web.HTTPMethodNotAllowed(request.method, ['GET'])
+                obj = await self.inspect('container', 'ephemio-' + sid)
+                if not obj:
+                    return web.json_response({'session': self.public(row), 'container': None})
+                _, stats = await command('docker', 'stats', '--no-stream', '--format', '{{json .}}', 'ephemio-' + sid)
+                return web.json_response({'session': self.public(row), 'paused': obj['State']['Paused'],
+                                          'usage': json.loads(stats) if stats else None})
+            if request.method != 'POST':
+                raise web.HTTPMethodNotAllowed(request.method, ['POST'])
+            async with self.lock:
+                if not self.active(self.get(sid)):
+                    raise web.HTTPConflict(text='Session is not active.')
+                obj = await self.inspect('container', 'ephemio-' + sid)
+                if not obj:
+                    raise web.HTTPConflict(text='Container is unavailable.')
+                paused = ticket_path == '/pause'
+                if obj['State']['Paused'] != paused:
+                    await command('docker', 'pause' if paused else 'unpause', 'ephemio-' + sid)
+                if paused:
+                    self.save('DELETE FROM grants WHERE desktop=?', (sid,))
+                    self.save('DELETE FROM tickets WHERE desktop=?', (sid,))
+                return web.json_response({'paused': paused})
+        if ticket_path == '/thumbnail':
+            if request.method != 'GET' or not self.active(row) or row['owner'] != data.get('owner'):
+                raise web.HTTPForbidden()
+            async with self.thumbnail_lock:
+                cached = self.thumbnails.get(sid)
+                if not cached or time.monotonic() - cached[0] >= 15:
+                    script = (
+                        'import base64,io,sys,urllib.request; from PIL import Image; '
+                        'url="http://127.0.0.1:8082/desktop/"+sys.argv[1]+"/api/screenshot"; '
+                        'raw=urllib.request.urlopen(url,timeout=4).read(16777216); '
+                        'im=Image.open(io.BytesIO(raw)); im.thumbnail((320,200)); '
+                        'out=io.BytesIO(); im.convert("RGB").save(out,format="JPEG",quality=65); '
+                        'print(base64.b64encode(out.getvalue()).decode())'
+                    )
+                    _, image = await command('docker', 'exec', '-u', 'abc', 'ephemio-' + sid,
+                                             'python3', '-c', script, sid, timeout=7)
+                    # Retain only live sessions, and never write screenshots to disk.
+                    self.thumbnails = {key: value for key, value in self.thumbnails.items() if self.active(self.get(key))}
+                    self.thumbnails[sid] = (time.monotonic(), image)
+                if not self.active(self.get(sid)):
+                    self.thumbnails.pop(sid, None)
+                    raise web.HTTPForbidden()
+                return web.json_response({'image': self.thumbnails[sid][1]}, headers={'Cache-Control': 'no-store'})
         if ticket_path:
             if not self.active(row) or row['owner'] != data.get('owner') or not ID.fullmatch(str(data.get('login', ''))):
                 raise web.HTTPForbidden()
@@ -152,10 +229,10 @@ class Worker:
                 raise web.HTTPBadRequest(text='Unknown desktop profile.')
             if not self.ready:
                 raise web.HTTPServiceUnavailable(text='Host is recovering.')
-            if not (time.time() < deadline <= time.time() + 3600):
+            if not (time.time() < deadline <= time.time() + self.limits['max_session_seconds']):
                 raise web.HTTPBadRequest(text='Invalid deadline.')
             count = self.db.execute("SELECT COUNT(*) FROM desktops WHERE state!='deleted'").fetchone()[0]
-            if count >= self.c['slots'] or memory_available() < 5 * GIB or shutil.disk_usage(self.c['state']).free < 20 * GIB:
+            if count >= self.limits['slots'] or memory_available() < self.limits['admit_memory_gib'] * GIB or shutil.disk_usage(self.c['state']).free < self.limits['admit_disk_gib'] * GIB:
                 raise web.HTTPConflict(text='Host has no desktop capacity.')
             self.save('INSERT INTO desktops(id,owner,deadline,state,created,profile) VALUES (?,?,?,?,?,?)',
                       (sid, owner, deadline, 'provisioning', int(time.time()), profile))
@@ -187,6 +264,7 @@ class Worker:
         return obj
 
     async def remove(self, sid):
+        self.thumbnails.pop(sid, None)
         name = 'ephemio-' + sid
         if await self.inspect('container', name):
             await command('docker', 'rm', '-f', name)
@@ -215,7 +293,7 @@ class Worker:
                 return
             await command('docker', 'run', '-d', '--name', name, '--label', LABEL, '--label', 'io.ephemio.session=' + sid,
                           '--network', name, '--publish', '127.0.0.1::3000', '--mount', 'type=volume,source=' + name + '-home,target=/config',
-                          '--cpus', '2', '--memory', '3g', '--memory-swap', '3g', '--shm-size', '1g', '--pids-limit', str(profile.get('pids_limit', 512)),
+                          '--cpus', str(self.limits['cpu_limit']), '--memory', str(int(self.limits['memory_gib'] * GIB)), '--memory-swap', str(int(self.limits['memory_gib'] * GIB)), '--shm-size', str(int(self.limits['shm_gib'] * GIB)), '--pids-limit', str(int(profile.get('pids_limit', self.limits['pids_limit']))),
                           '--restart', 'no', '--log-opt', 'max-size=10m', '--log-opt', 'max-file=2',
                           '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1',
                           '-e', 'PUID=1000', '-e', 'PGID=1000', '-e', 'TZ=Asia/Jerusalem',
@@ -255,11 +333,11 @@ class Worker:
                             self.save('INSERT INTO desktops(id,owner,deadline,state,created,reason) VALUES (?,?,?,?,?,?)',
                                       (match[1], '', 0, 'deleting', int(time.time()), 'orphan'))
             rows = list(self.db.execute("SELECT * FROM desktops WHERE state!='deleted'"))
-            pressure = memory_available() < 2 * GIB or shutil.disk_usage(self.c['state']).free < 15 * GIB
+            pressure = memory_available() < self.limits['pressure_memory_gib'] * GIB or shutil.disk_usage(self.c['state']).free < self.limits['pressure_disk_gib'] * GIB
             check_size = time.time() - self.last_usage > 30
             for row in rows:
                 sid = row['id']
-                if row['deadline'] <= time.time() or pressure or (row['state'] == 'provisioning' and time.time() - row['created'] > 300):
+                if row['deadline'] <= time.time() or pressure or (row['state'] == 'provisioning' and time.time() - row['created'] > self.limits['startup_timeout_seconds']):
                     self.save("UPDATE desktops SET state='deleting',reason=? WHERE id=?", ('host_pressure' if pressure else 'expired' if row['deadline'] <= time.time() else 'startup_timeout', sid))
                 elif row['state'] == 'active' and check_size:
                     obj = await self.inspect('container', 'ephemio-' + sid)
@@ -268,7 +346,7 @@ class Worker:
                     else:
                         volume = await self.inspect('volume', 'ephemio-' + sid + '-home')
                         _, used = await command('du', '-sb', volume['Mountpoint'], obj['GraphDriver']['Data']['UpperDir'], timeout=20)
-                        if sum(int(line.split()[0]) for line in used.splitlines()) > 5 * GIB:
+                        if sum(int(line.split()[0]) for line in used.splitlines()) > self.limits['storage_limit_gib'] * GIB:
                             self.save("UPDATE desktops SET state='deleting',reason='storage_limit' WHERE id=?", (sid,))
                 row = self.get(sid)
                 try:
