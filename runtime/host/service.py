@@ -69,6 +69,9 @@ class Worker:
         CREATE TABLE IF NOT EXISTS grants (
           hash TEXT PRIMARY KEY, desktop TEXT NOT NULL, login TEXT NOT NULL, expires INTEGER NOT NULL);
         ''')
+        # Existing browser grants now follow the desktop lifetime as well.
+        self.db.execute('''UPDATE grants SET expires=(SELECT deadline FROM desktops WHERE desktops.id=grants.desktop)
+                           WHERE EXISTS (SELECT 1 FROM desktops WHERE desktops.id=grants.desktop)''')
         self.db.commit()
         if 'profile' not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
             self.save("ALTER TABLE desktops ADD COLUMN profile TEXT NOT NULL DEFAULT 'ubuntu-kde'")
@@ -81,6 +84,7 @@ class Worker:
         self.ready = False
         self.lock = asyncio.Lock()
         self.last_usage = 0
+        self.guest_usage = {}
         self.thumbnails = {}
         self.thumbnail_lock = asyncio.Lock()
 
@@ -99,6 +103,70 @@ class Worker:
 
     def active(self, row):
         return self.ready and row and row['state'] == 'active' and row['deadline'] > time.time()
+
+    def guest_token(self, sid):
+        return hmac.new(self.c['signing_key'].encode(), ('guest:' + sid).encode(), hashlib.sha256).hexdigest()
+
+    def guest_directory(self):
+        return str(Path(self.c['state']) / 'guest-api')
+
+    async def guest(self, request):
+        sid = request.match_info['sid']
+        if not ID.fullmatch(sid) or not hmac.compare_digest(
+                request.headers.get('Authorization', ''), 'Bearer ' + self.guest_token(sid)):
+            raise web.HTTPForbidden()
+        action = request.match_info['action']
+        if action not in ('status', 'extend', 'pause', 'terminate'):
+            raise web.HTTPNotFound()
+        expected = 'GET' if action == 'status' else 'POST'
+        if request.method != expected:
+            raise web.HTTPMethodNotAllowed(request.method, [expected])
+        async with self.lock:
+            row = self.get(sid)
+            if not self.active(row):
+                raise web.HTTPConflict(text='Session has ended or host is recovering. Reopen Ephemio.')
+            if action == 'extend':
+                deadline = min(row['deadline'] + 900, int(time.time()) + int(self.limits['max_session_seconds']))
+                if deadline <= row['deadline']:
+                    raise web.HTTPConflict(text='Session is already at the maximum remaining time.')
+                with self.db:
+                    self.db.execute('UPDATE desktops SET deadline=? WHERE id=?', (deadline, sid))
+                    self.db.execute('UPDATE grants SET expires=? WHERE desktop=?', (deadline, sid))
+            elif action == 'pause':
+                await command('docker', 'pause', 'ephemio-' + sid)
+                with self.db:
+                    self.db.execute('DELETE FROM grants WHERE desktop=?', (sid,))
+                    self.db.execute('DELETE FROM tickets WHERE desktop=?', (sid,))
+                return web.json_response({'state': 'paused'})
+            elif action == 'terminate':
+                self.save("UPDATE desktops SET state='deleting',reason='ended' WHERE id=?", (sid,))
+                await self.remove(sid)
+                return web.json_response({'state': 'deleted'})
+            cached = self.guest_usage.get(sid)
+            if not cached or time.monotonic() - cached[0] >= 10:
+                _, stats = await command('docker', 'stats', '--no-stream', '--format', '{{json .}}', 'ephemio-' + sid, timeout=8)
+                obj = await self.inspect('container', 'ephemio-' + sid)
+                volume = await self.inspect('volume', 'ephemio-' + sid + '-home')
+                _, used = await command('du', '-sb', volume['Mountpoint'], obj['GraphDriver']['Data']['UpperDir'], timeout=8)
+                usage = json.loads(stats)
+                usage['DiskBytes'] = sum(int(line.split()[0]) for line in used.splitlines())
+                usage['DiskLimitBytes'] = int(self.limits['storage_limit_gib'] * GIB)
+                # Read this container's network namespace, including IPv4 and IPv6.
+                script = (
+                    'from pathlib import Path; '
+                    'print(sum(line.split()[3] == "01" '
+                    'for name in ("tcp", "tcp6") '
+                    'if (path := Path("/proc/net") / name).exists() '
+                    'for line in path.read_text().splitlines()[1:]))'
+                )
+                _, connections = await command('docker', 'exec', '-u', 'abc', 'ephemio-' + sid,
+                                               '/usr/bin/python3', '-c', script, timeout=8)
+                usage['TCPConnections'] = int(connections)
+                self.guest_usage[sid] = (time.monotonic(), usage)
+            row = self.get(sid)
+            result = {'usage': self.guest_usage[sid][1], 'session': self.public(row), 'server_time': int(time.time()),
+                      'max_remaining_seconds': int(self.limits['max_session_seconds'])}
+            return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
     async def rpc(self, request):
         data = await request.json() if request.can_read_body else {}
@@ -144,7 +212,7 @@ class Worker:
             if not existing or existing['desktop'] != ticket['desktop'] or existing['login'] != ticket['login'] or existing['expires'] <= time.time():
                 token = secrets.token_urlsafe(32)
             deadline = self.get(ticket['desktop'])['deadline']
-            expires = min(int(time.time()) + 300, deadline)
+            expires = deadline
             with self.db:
                 self.db.execute('DELETE FROM tickets WHERE hash=?', (hashed,))
                 self.db.execute('INSERT OR REPLACE INTO grants VALUES (?,?,?,?)', (digest(token), ticket['desktop'], ticket['login'], expires))
@@ -264,6 +332,7 @@ class Worker:
         return obj
 
     async def remove(self, sid):
+        self.guest_usage.pop(sid, None)
         self.thumbnails.pop(sid, None)
         name = 'ephemio-' + sid
         if await self.inspect('container', name):
@@ -292,6 +361,8 @@ class Worker:
             if self.get(sid)['state'] != 'provisioning':
                 return
             await command('docker', 'run', '-d', '--name', name, '--label', LABEL, '--label', 'io.ephemio.session=' + sid,
+                          '--mount', 'type=bind,source=' + self.guest_directory() + ',target=/run/ephemio-guest,readonly',
+                          '-e', 'EPHEMIO_SESSION_ID=' + sid, '-e', 'EPHEMIO_GUEST_TOKEN=' + self.guest_token(sid),
                           '--network', name, '--publish', '127.0.0.1::3000', '--mount', 'type=volume,source=' + name + '-home,target=/config',
                           '--cpus', str(self.limits['cpu_limit']), '--memory', str(int(self.limits['memory_gib'] * GIB)), '--memory-swap', str(int(self.limits['memory_gib'] * GIB)), '--shm-size', str(int(self.limits['shm_gib'] * GIB)), '--pids-limit', str(int(profile.get('pids_limit', self.limits['pids_limit']))),
                           '--restart', 'no', '--log-opt', 'max-size=10m', '--log-opt', 'max-file=2',
@@ -432,7 +503,9 @@ class Gateway:
             result = web.Response(text='<script>parent.postMessage({renewed:true},' + json.dumps(origin) + ')</script>', content_type='text/html')
         else:
             result = web.HTTPSeeOther('/desktop/' + grant['id'] + '/')
-        result.set_cookie(COOKIE, grant['token'], secure=True, httponly=True, samesite='Strict', path='/', max_age=max(1, grant['expires'] - int(time.time())))
+        # A browser-session cookie survives desktop extensions; the worker enforces
+        # the current deadline and revocation on every request and active stream.
+        result.set_cookie(COOKIE, grant['token'], secure=True, httponly=True, samesite='Strict', path='/')
         result.headers['Cache-Control'] = 'no-store'
         result.headers['Referrer-Policy'] = 'no-referrer'
         return result
@@ -568,6 +641,22 @@ async def main():
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         app.cleanup_ctx.append(lifecycle)
+        # This listener exposes only session-scoped guest operations, never worker RPC.
+        guest_dir = Path(worker.guest_directory())
+        guest_dir.mkdir(mode=0o755, exist_ok=True)
+        # systemd's UMask=0007 strips traversal for the guest UID at mkdir time.
+        os.chmod(guest_dir, 0o755)
+        guest_socket = guest_dir / 'api.sock'
+        guest_socket.unlink(missing_ok=True)
+        guest_app = web.Application(middlewares=[errors], client_max_size=1024)
+        guest_app.router.add_route('*', '/guest/{sid}/{action}', worker.guest)
+        guest_runner = web.AppRunner(guest_app, access_log=None)
+        await guest_runner.setup()
+        await web.UnixSite(guest_runner, str(guest_socket)).start()
+        os.chmod(guest_socket, 0o666)
+        async def guest_cleanup(app):
+            await guest_runner.cleanup()
+        app.on_cleanup.append(guest_cleanup)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         socket = config['socket']

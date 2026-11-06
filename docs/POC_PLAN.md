@@ -92,15 +92,14 @@ permissions. The web root contains only public PHP entry points and assets.
    account/session and local lifecycle state. Reject foreign WebSocket Origins.
    Strip portal/gateway cookies and client-supplied proxy/auth headers before
    forwarding to the container. The destination comes only from worker state.
-6. Gateway access expires after five minutes or at the desktop deadline, whichever
-   comes first. A portal connection page renews access while the account remains
-   authenticated, through fresh POSTed tickets and exact-origin messaging.
-   Reopening from the dashboard is the fallback if the portal tab is closed.
-   Renewal changes the gateway grant, never the desktop's fixed deadline.
-7. End, expiry, logout, and account disabling revoke access. The gateway tracks
-   and closes existing WebSockets on revocation or grant expiry; checking only
-   the initial upgrade would leave an open stream usable. If immediate logout
-   revocation cannot reach the host, the five-minute grant is the upper bound.
+6. Browser access lasts until the desktop deadline, including extensions, or
+   explicit revocation. The host-only cookie is a browser-session cookie;
+   periodic renewal is unnecessary. Fresh single-use connection tickets remain
+   short-lived. Existing portal renewal requests are supported for compatibility.
+7. End, expiry, logout, and account disabling revoke access. The gateway checks
+   active WebSockets every two seconds and closes them on revocation or expiry.
+   Logout revocation depends on delivery to the host; if the host cannot receive
+   it, access can remain valid until the desktop deadline.
 
 The customer uses their Ephemio credentials once; no SSH or shared desktop
 password is exposed. Disable Webtop's own sharing/collaboration links. Container

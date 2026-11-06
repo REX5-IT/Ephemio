@@ -98,3 +98,31 @@ binary and desktop launchers, backs up the configuration, registers the image
 ID and restarts Ephemio services. Failed activation restores the configuration.
 Start a new KDE session afterward; existing desktops retain their original image.
 This validates packaging; graphical application compatibility still varies.
+
+### Guest companion API
+
+The worker exposes a separate Unix socket at `<state>/guest-api/api.sock`.
+New containers mount only that directory read-only at `/run/ephemio-guest`;
+they never receive the worker RPC socket, Docker socket, or host signing key.
+A per-session HMAC bearer credential in the container environment authenticates
+`GET /guest/<id>/status` and `POST /guest/<id>/{extend,pause,terminate}`.
+Credentials cannot authorize another session, and ended/expired sessions cannot
+act. Processes inside a desktop share its control authority, including deletion.
+There is no TCP listener or guest firewall exception. The socket directory is
+persistent so worker restarts replace the socket within existing bind mounts.
+
+Extension updates the authoritative host deadline, which is included in normal
+portal snapshots. Portal integration must accept the host's updated deadline;
+replaying the original creation specification receives 409 (as before).
+The portal implementation is outside this repository. Check deadline display
+and host-sync behavior against the portal before rollout.
+
+Browser access has no independent five-minute timeout. Grants follow the desktop
+session deadline, and companion extensions update existing grants atomically.
+The Secure, HttpOnly, SameSite=Strict cookie lasts for the browser session; the
+worker enforces expiry and revocation, including on active WebSocket streams.
+Existing short-lived grant records are aligned to their desktop deadlines on
+worker startup. After deploying, reopen the desktop from Ephemio once to replace
+any cookie previously issued with a five-minute Max-Age. No image rebuild is
+required for this browser-access change. Legacy portal renewal still works but
+is unnecessary. Logout revocation still requires delivery to the host.

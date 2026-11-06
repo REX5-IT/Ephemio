@@ -48,7 +48,7 @@ a bounded 768-task cap. CPU and memory limits remain 2 CPUs and 3 GiB.
 Sustained application performance still needs measurement on this profile.
 
 Desktop sessions disable screen locking and idle suspension; access is governed
-by portal credentials, short-lived browser grants and the session deadline.
+by portal credentials, session-bound browser grants and the session deadline.
 Audio plays through the browser from the container's virtual audio sink.
 
 Images share layers. `docker images` sizes cannot be added to determine disk
@@ -74,3 +74,43 @@ which is deleted with session storage.
 Before deployment, verify Wine Settings, EXE and MSI installation, launching an
 installed app, reconnecting, and session volume removal in a fresh browser
 session. Record Wine version and resource use alongside the tested image ID.
+
+## Session companion
+
+After building a desktop base, add the shared companion layer (repeat for each
+profile, using that profile's base tag):
+
+```bash
+docker build --build-arg BASE_IMAGE=ephemio/ubuntu-gnome:VERSION \
+  -t ephemio/ubuntu-gnome:VERSION-status common/
+```
+
+Register the resulting immutable image ID. `deploy-image.sh` includes this layer
+for KDE. Deploy the updated host worker before launching new desktops. Existing
+containers do not gain the guest socket, credentials or app until recreated.
+Standalone Compose skips the app because it has no host session.
+
+The companion starts automatically and opens a floating status window. Closing
+it hides it to the tray where supported, or minimizes it when no tray exists
+(including Fedora's GNOME shell). The application menu also has **Ephemio Session**.
+Fedora starts the window inside its nested Wayland desktop; GNOME does not
+provide tray icons by default. KDE, Cinnamon and Ubuntu's enabled AppIndicator
+extension can provide a tray, depending on Qt's tray integration.
+
+CPU (100% per core), memory, cumulative network and disk I/O, and combined
+writable-layer/home disk usage refresh from the host every 10 seconds. A local
+countdown updates continuously and the window reappears below five minutes.
+Extend adds up to 15 minutes, capped at the host's `max_session_seconds` of
+remaining time. Pause freezes the desktop and revokes browser access; the timer
+continues and users resume from Ephemio. Terminate immediately removes the
+desktop and its storage. These actions do not require confirmation dialogs.
+
+The app needs a live desktop: it cannot remain visible after the host deletes
+or pauses its container. Browser access lasts until the desktop deadline or explicit revocation.
+Extending a desktop also extends existing browser grants. Periodic portal
+renewal is no longer required; reconnect through Ephemio if the browser loses
+its session cookie.
+
+Webtop's nested KDE Wayland startup reads only user autostart files, rather
+than `/etc/xdg/autostart`. The companion layer includes its entry explicitly
+in that startup loop. Rebuild the companion image to apply this startup fix.

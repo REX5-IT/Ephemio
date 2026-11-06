@@ -16,5 +16,12 @@ exec dbus-run-session -- bash -c '
   /usr/bin/python3 /defaults/gnome-input.py &
   openbox --config-file /defaults/fedora-openbox.xml &
   timeout 60 xdotool search --sync --onlyvisible --name "^Mutter Development Kit$" windowactivate --sync &
+  # The devkit shell has no gnome-session to run XDG autostart entries.
+  if [ -f /usr/local/lib/ephemio-status.py ]; then
+    (
+      while [ ! -S "$XDG_RUNTIME_DIR/wayland-gnome" ]; do sleep 0.5; done
+      QT_QPA_PLATFORM=wayland WAYLAND_DISPLAY=wayland-gnome /usr/bin/python3 /usr/local/lib/ephemio-status.py
+    ) &
+  fi
   exec gnome-shell --devkit --wayland --wayland-display=wayland-gnome
 '

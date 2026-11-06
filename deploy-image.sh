@@ -12,12 +12,16 @@ esac
 stage=$("${SSH[@]}" 'mktemp -d /tmp/ephemio-image.XXXXXXXX')
 [[ "$stage" =~ ^/tmp/ephemio-image\.[a-zA-Z0-9]+$ ]] || exit 1
 trap '"${SSH[@]}" "sudo -n rm -rf -- $stage"' EXIT
-rsync -az -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' "$ROOT/runtime/images/ubuntu-kde/" "$REMOTE:$stage/"
+rsync -az -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' "$ROOT/runtime/images/ubuntu-kde/" "$REMOTE:$stage/base/"
+rsync -az -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' "$ROOT/runtime/images/common/" "$REMOTE:$stage/common/"
 "${SSH[@]}" "sudo -n bash -s -- $stage" <<'REMOTE'
 set -Eeuo pipefail
-docker build -t ephemio/ubuntu-kde:wine "$1"
+docker build -t ephemio/ubuntu-kde:wine-base "$1/base"
+docker build --build-arg BASE_IMAGE=ephemio/ubuntu-kde:wine-base -t ephemio/ubuntu-kde:wine "$1/common"
 image=$(docker image inspect ephemio/ubuntu-kde:wine --format '{{.Id}}')
 docker run --rm --network none --entrypoint /bin/sh "$image" -ec '
+    /usr/bin/python3 -c "from PyQt5 import QtWidgets"
+    test -f /etc/xdg/autostart/ephemio-status.desktop
     wine --version
     command -v winecfg
     desktop-file-validate /usr/share/applications/ephemio-wine.desktop

@@ -8,8 +8,8 @@ The four deployment stages are implemented and deployed. The public portal is
 
 The administrator account for `sebastian@rex5.com` received an SMTP setup email.
 The single-use setup link lasts 24 hours. Choose a password, sign in, select a
-15/30/60-minute session, launch, and open the desktop. Keep the dashboard open
-so access renews automatically. Closing the desktop tab leaves the session
+15/30/60-minute session, launch, and open the desktop. Browser access follows the desktop deadline
+without periodic renewal. Closing the desktop tab leaves the session
 running; **End & delete** or expiry removes its files and environment.
 
 The administrator dashboard can invite other testers. They receive their own

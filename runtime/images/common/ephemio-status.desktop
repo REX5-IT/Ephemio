@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ephemio Session
+Comment=Session time, resource usage and controls
+Exec=/usr/bin/python3 /usr/local/lib/ephemio-status.py
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+X-GNOME-Autostart-enabled=true
