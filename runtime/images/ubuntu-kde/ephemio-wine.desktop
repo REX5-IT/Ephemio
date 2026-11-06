@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Run with Wine
+Comment=Run a Windows application; compatibility varies
+Exec=ephemio-wine %f
+Icon=wine
+Terminal=false
+Categories=Utility;
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/x-dosexec;application/vnd.microsoft.portable-executable;application/x-msi;

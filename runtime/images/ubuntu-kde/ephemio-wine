@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+# All Windows files and registry state belong to this disposable session.
+export WINEPREFIX=/config/.wine
+case "${1:-}" in
+    --settings) exec winecfg ;;
+    '') exec winefile ;;
+    *)
+        installer=$(realpath -- "$1")
+        case "$installer" in
+            *.[mM][sS][iI]) exec wine msiexec /i "$installer" ;;
+            *) exec wine "$installer" ;;
+        esac
+        ;;
+esac

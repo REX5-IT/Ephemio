@@ -56,3 +56,21 @@ usage. Inspect `df -h /` and `docker system df -v`. On a shared host, remove onl
 identified Ephemio test containers and obsolete image IDs. Do not run global
 prune commands. Keep configured images and enough space for rebuilds and guest
 data; admission currently requires at least 20 GiB free.
+
+## Ubuntu KDE with Wine
+
+Build with `docker build -t ephemio/ubuntu-kde:wine ubuntu-kde/`, then inspect
+its immutable ID with `docker image inspect ephemio/ubuntu-kde:wine`.
+Register the tested ID under the host's `ubuntu-kde` profile, retaining
+`process: plasmashell`. For local Compose, set
+`EPHEMIO_DESKTOP_IMAGE=ephemio/ubuntu-kde:wine`.
+
+Users upload or download EXE/MSI installers and choose **Open With → Run with
+Wine**. **Wine Settings** appears in the application menu. Both 32-bit and
+64-bit packages are included. Compatibility varies; users can try any app.
+Wine initializes on first use and stores its environment in `/config/.wine`,
+which is deleted with session storage.
+
+Before deployment, verify Wine Settings, EXE and MSI installation, launching an
+installed app, reconnecting, and session volume removal in a fresh browser
+session. Record Wine version and resource use alongside the tested image ID.

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wine Settings
+Comment=Configure Windows application compatibility
+Exec=ephemio-wine --settings
+Icon=wine
+Terminal=false
+Categories=Settings;

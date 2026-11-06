@@ -72,3 +72,29 @@ The service has one slot, 2 CPU/3 GiB memory limits, a five-second lifecycle loo
 and a sampled 5 GiB disk usage cutoff. This is a trusted-tester POC on a shared
 kernel. See the [deployment report](../../docs/DEPLOYMENT.md) for observed checks
 and remaining limitations.
+
+## Deploy host code from this checkout
+
+Run `./deploy.sh --dry-run` from the repository root to preview the host-code
+update on `ubuntu@137.74.12.96`. Run `./deploy.sh` to deploy. Override the SSH
+destination with `EPHEMIO_SSH_HOST=user@host`. SSH host keys must already be
+trusted and passwordless sudo must be available.
+
+This updates an existing installation: it tests staged code in a temporary
+virtual environment, backs up host code and the installed virtual environment
+under `/opt/ephemio-backup.*`, installs requirements and code, then restarts only
+Ephemio's worker/gateway/sync services. Errors during installation or service
+checks trigger restoration. Restart briefly interrupts desktop connections;
+existing desktop containers and session storage are preserved. Database schema
+changes are not rolled back automatically.
+
+The script does not provision a new VPS or update systemd units, Nginx,
+firewall rules, secrets, desktop images, profile configuration or portal files.
+Deploy images using the image build and profile registration instructions above.
+
+Deploy Ubuntu KDE with Wine using `./deploy-image.sh` from the repository root
+(`--dry-run` previews the action). It builds on the VPS, validates the Wine
+binary and desktop launchers, backs up the configuration, registers the image
+ID and restarts Ephemio services. Failed activation restores the configuration.
+Start a new KDE session afterward; existing desktops retain their original image.
+This validates packaging; graphical application compatibility still varies.
