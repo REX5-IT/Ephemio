@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 """Desktop companion; host credentials are scoped to this disposable session."""
+import importlib.util
+from pathlib import Path
 import http.client
 import json
 import os
@@ -32,6 +34,10 @@ def call(action):
     finally:
         conn.close()
 
+
+spec = importlib.util.spec_from_file_location('ephemio_tools', Path(__file__).with_name('ephemio-tools.py'))
+tools = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tools)
 
 COLORS = {'cpu': '#9c8cff', 'memory': '#4cc9d9', 'disk': '#f3b86b', 'network': '#69d6a4'}
 
@@ -160,6 +166,8 @@ QTabBar::tab:selected { color: #b8acff; border-bottom: 2px solid #9c8cff; }
 QTabBar::tab:hover { color: #e9edf5; }
 QLineEdit { background: #1a2332; border: 1px solid #36455c; border-radius: 8px; padding: 10px; }
 QLineEdit:focus { border-color: #9c8cff; }
+QProgressBar { background: #1a2332; border: 1px solid #36455c; border-radius: 5px; min-height: 10px; }
+QProgressBar::chunk { background: #9c8cff; border-radius: 4px; }
 QScrollArea { border: none; }
 QScrollBar:vertical { background: #101722; width: 8px; }
 QScrollBar::handle:vertical { background: #36455c; min-height: 20px; border-radius: 4px; }
@@ -184,6 +192,10 @@ class Companion(QtWidgets.QWidget):
         self.setWindowTitle('Ephemio session')
         self.setStyleSheet(STYLE)
         self.pool = ThreadPoolExecutor(max_workers=1)
+        self.local_pool = ThreadPoolExecutor(max_workers=1)
+        self.local_future = None
+        self.seen_connections = {}
+        self.local_buttons = []
         self.future = None
         self.queued_action = None
         self.deadline = None
@@ -236,7 +248,46 @@ class Companion(QtWidgets.QWidget):
         self.tcp = label('TCP connections  —', 'muted')
         self.tcp.setToolTip('Established TCP connections in this desktop, including IPv4 and IPv6. Listening sockets are excluded.')
         grid.addWidget(self.tcp, 3, 0, 1, 2)
+        show_tcp = QtWidgets.QPushButton('Show TCP connections…')
+        show_tcp.clicked.connect(self.show_connections)
+        grid.addWidget(show_tcp, 4, 0, 1, 2)
         self.tabs.addTab(overview, 'Overview')
+        storage_page = QtWidgets.QWidget()
+        storage_layout = QtWidgets.QVBoxLayout(storage_page)
+        self.user_storage = label('▣  User storage', 'brand')
+        storage_layout.addWidget(self.user_storage)
+        detail = label('Your files stay on this host across sessions. Connect to show them in /config/Documents. Disconnect restores a local Documents folder; open files and the backing directory remain accessible.', 'muted')
+        detail.setWordWrap(True)
+        storage_layout.addWidget(detail)
+        for title, callback in (
+                ('⇥ Connect User storage', lambda: tools.storage(True)),
+                ('⏏ Disconnect User storage', lambda: tools.storage(False))):
+            storage_layout.addWidget(self.local_button(title, callback))
+        consent = QtWidgets.QCheckBox('Keep Chromium history, cookies and website sign-ins')
+        storage_layout.addWidget(consent)
+        warning = label('Opt-in browser profile stores sensitive login data without desktop keyring encryption. Use only on a trusted host. Existing browser windows are separate. Website sign-ins may expire.', 'muted')
+        warning.setWordWrap(True)
+        storage_layout.addWidget(warning)
+        launch = self.local_button('Launch persistent Chromium', tools.browser)
+        launch.setEnabled(False)
+        consent.toggled.connect(launch.setEnabled)
+        self.browser_consent = consent
+        self.browser_button = launch
+        storage_layout.addWidget(launch)
+        future_sync = label('Storage backend: local directory. Cloud / FTP sync is planned; no remote account is connected.', 'muted')
+        future_sync.setWordWrap(True)
+        storage_layout.addWidget(future_sync)
+        storage_layout.addStretch()
+        self.tabs.addTab(storage_page, 'User storage')
+        catalog = QtWidgets.QWidget()
+        catalog_layout = QtWidgets.QVBoxLayout(catalog)
+        note = label('One-click installs from this desktop’s configured package repositories. Apps are removed when the session ends.', 'muted')
+        note.setWordWrap(True)
+        catalog_layout.addWidget(note)
+        for key, (title, package) in tools.CATALOG.items():
+            catalog_layout.addWidget(self.local_button('Install ' + title, lambda k=key: tools.install(k)))
+        catalog_layout.addStretch()
+        self.tabs.addTab(catalog, 'Apps')
         controls = QtWidgets.QWidget()
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 14, 0, 0)
@@ -273,6 +324,18 @@ class Companion(QtWidgets.QWidget):
         controls_layout.addWidget(scroll)
         self.tabs.addTab(controls, 'Controls')
 
+        self.operation = QtWidgets.QWidget()
+        operation_layout = QtWidgets.QVBoxLayout(self.operation)
+        operation_layout.setContentsMargins(0, 0, 0, 0)
+        self.operation_label = label('', 'muted')
+        operation_layout.addWidget(self.operation_label)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setAccessibleName('Operation in progress')
+        operation_layout.addWidget(self.progress)
+        self.operation.hide()
+        layout.addWidget(self.operation)
         self.message = label('', 'muted')
         self.message.setWordWrap(True)
         self.message.hide()
@@ -288,6 +351,7 @@ class Companion(QtWidgets.QWidget):
         self.tray.setIcon(icon)
         menu = QtWidgets.QMenu(self)
         menu.addAction('Show session status', self.reveal)
+        menu.addAction('TCP connections', self.show_connections)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self.reveal())
         self.tray.show()
@@ -298,6 +362,51 @@ class Companion(QtWidgets.QWidget):
         self.timer.timeout.connect(self.tick)
         self.timer.start(250)
         self.next_poll = 0
+
+    def local_button(self, title, callback):
+        button = QtWidgets.QPushButton(title)
+        button.clicked.connect(lambda: self.run_local(callback, title))
+        self.local_buttons.append(button)
+        return button
+
+    def run_local(self, callback, title='Working'):
+        if self.local_future:
+            return
+        self.operation_label.setText(title + '…')
+        self.progress.setAccessibleName(title + ' in progress')
+        self.operation.show()
+        self.notify('')
+        for button in self.local_buttons:
+            button.setEnabled(False)
+        self.local_future = self.local_pool.submit(callback)
+
+    def show_connections(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('TCP connections')
+        dialog.resize(850, 380)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        note = label('Public TCP connections grouped by remote IP · earliest first-observed time · direction inferred from listening ports. Refresh to update.', 'muted')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        table = QtWidgets.QTableWidget(0, 6)
+        table.setHorizontalHeaderLabels(['Direction', 'First observed', 'Remote IP', 'Ports', 'Connections', 'Country'])
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        layout.addWidget(table)
+        def refresh():
+            try:
+                rows = tools.connections(self.seen_connections)
+                table.setRowCount(len(rows))
+                for i, row in enumerate(rows):
+                    for j, value in enumerate(row):
+                        table.setItem(i, j, QtWidgets.QTableWidgetItem(value))
+            except Exception as exc:
+                note.setText(str(exc))
+        button = QtWidgets.QPushButton('Refresh')
+        button.clicked.connect(refresh)
+        layout.addWidget(button)
+        refresh()
+        dialog.exec_()
 
     @staticmethod
     def make_icon(kind):
@@ -403,6 +512,18 @@ class Companion(QtWidgets.QWidget):
         self.tcp.setText(f"TCP connections    {usage.get('TCPConnections', '—')} established")
 
     def tick(self):
+        connected = tools.DOCUMENTS.is_symlink() and tools.DOCUMENTS.resolve() == tools.ROOT / 'Documents'
+        self.user_storage.setText('▣  User storage · ' + ('Connected' if connected else 'Disconnected'))
+        if self.local_future and self.local_future.done():
+            try:
+                self.notify(self.local_future.result())
+            except Exception as exc:
+                self.notify(str(exc)[:1200], error=True)
+            self.local_future = None
+            self.operation.hide()
+            for button in self.local_buttons:
+                button.setEnabled(True)
+            self.browser_button.setEnabled(self.browser_consent.isChecked())
         if self.future and self.future.done():
             action = self.action
             try:

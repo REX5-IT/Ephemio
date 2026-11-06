@@ -36,6 +36,67 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
         self.worker.db.close()
         self.temp.cleanup()
 
+    async def test_storage_isolation_and_special_files(self):
+        import os
+        root = Path(self.temp.name) / 'users' / self.owner
+        root.mkdir(parents=True)
+        (root / 'folder').mkdir()
+        (root / 'folder' / 'hello.txt').write_text('hello')
+        outside = Path(self.temp.name) / 'private.txt'
+        outside.write_text('private')
+        (root / 'escape').symlink_to(outside)
+        (root / 'directory-escape').symlink_to(outside.parent, target_is_directory=True)
+        os.link(outside, root / 'hardlink')
+        os.mkfifo(root / 'pipe')
+        async def request(path='', download=False, owner=None):
+            return await self.client.get('/v1/storage', json={'owner': owner or self.owner, 'path': path, 'download': download})
+        response = await request()
+        self.assertEqual(response.status, 200)
+        self.assertEqual([item['name'] for item in (await response.json())['entries']], ['folder'])
+        response = await request('folder/hello.txt', True)
+        self.assertEqual((await response.json())['content'], 'aGVsbG8=')
+        for path in ('../private.txt', '/etc/passwd', 'folder/../escape', 'escape', 'directory-escape/private.txt', 'hardlink', 'pipe'):
+            self.assertGreaterEqual((await request(path, True)).status, 400, path)
+        self.assertEqual((await request(owner='../bad')).status, 400)
+        self.assertEqual((await request('folder/hello.txt', True, secrets.token_hex(16))).status, 404)
+        with (root / 'large').open('wb') as file:
+            file.truncate(16 * 1024 * 1024 + 1)
+        self.assertEqual((await request('large', True)).status, 400)
+
+    async def test_new_session_identity_validation_and_immutability(self):
+        sid = secrets.token_hex(16)
+        data = {'owner': self.owner, 'deadline': self.deadline, 'linux_username': 'alice', 'full_name': 'Alice Example', 'hostname': 'my-desktop'}
+        self.worker.limits['slots'] = 10
+        self.worker.limits['admit_disk_gib'] = 0
+        self.worker.limits['admit_memory_gib'] = 0
+        path = '/v1/desktops/' + sid
+        for key, value in [('linux_username', 'root'), ('linux_username', 'bad:name'), ('full_name', 'bad:name'), ('hostname', '-bad')]:
+            response = await self.client.put(path, json={**data, key: value})
+            self.assertEqual(response.status, 400)
+        self.assertEqual((await self.client.put(path, json=data)).status, 202)
+        row = self.worker.get(sid)
+        self.assertEqual((row['linux_username'], row['full_name'], row['hostname']), ('alice', 'Alice Example', 'my-desktop'))
+        self.assertEqual((await self.client.put(path, json=data)).status, 200)
+        self.assertEqual((await self.client.put(path, json={**data, 'full_name': 'Changed'})).status, 409)
+
+    async def test_provision_passes_identity_and_unique_hostname(self):
+        self.worker.c['signing_key'] = 'test-only'
+        sid = secrets.token_hex(16)
+        self.worker.save("INSERT INTO desktops(id,owner,deadline,state,created,linux_username,full_name,hostname) VALUES(?,?,?,?,?,?,?,?)",
+                         (sid, self.owner, self.deadline, 'provisioning', int(time.time()), 'alice', 'Alice Example', 'ephemio'))
+        container = {'State': {'Running': True}, 'NetworkSettings': {'Ports': {'3000/tcp': [{'HostPort': '12345'}]}}}
+        with patch.object(self.worker, 'inspect', AsyncMock(side_effect=[{'exists': True}, {'exists': True}, None, container])), \
+                patch.object(service, 'command', AsyncMock(return_value=(0, ''))) as command, \
+                patch.object(service.os, 'chown'), patch.object(service, 'ClientSession', side_effect=OSError):
+            await self.worker.provision(self.worker.get(sid))
+        args = command.call_args.args
+        self.assertIn('EPHEMIO_LINUX_USERNAME=alice', args)
+        self.assertIn('EPHEMIO_FULL_NAME=Alice Example', args)
+        hostname = args[args.index('--hostname') + 1]
+        self.assertTrue(hostname.startswith('ephemio-'))
+        self.assertLessEqual(len(hostname), 63)
+        self.assertTrue(hostname.endswith(sid[:8]))
+
     async def ticket(self):
         response = await self.client.post('/v1/desktops/' + self.sid + '/tickets', json={'owner': self.owner, 'login': self.login})
         self.assertEqual(response.status, 200)
@@ -185,7 +246,7 @@ class GuestAuthorization(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(usage['TCPConnections'], 7)
             self.assertEqual(command.await_count, 3)
             args = command.await_args_list[-1].args
-            self.assertEqual(args[:4], ('docker', 'exec', '-u', 'abc'))
+            self.assertEqual(args[:4], ('docker', 'exec', '-u', '1000'))
             self.assertEqual(args[4], 'ephemio-' + self.sid)
 
     async def test_guest_extension_cap_and_expiry(self):

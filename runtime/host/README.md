@@ -80,6 +80,14 @@ update on `ubuntu@137.74.12.96`. Run `./deploy.sh` to deploy. Override the SSH
 destination with `EPHEMIO_SSH_HOST=user@host`. SSH host keys must already be
 trusted and passwordless sudo must be available.
 
+Run `./deploy.sh --cleanup --dry-run` to preview remote cleanup, then
+`./deploy.sh --cleanup` (or `--clean-up`) to remove deployment staging directories
+in `/tmp` older than one day, host deployment backups older than seven days
+(always retaining the newest backup), and installed host tests and Python caches.
+Cleanup runs without deploying or restarting services. The next deployment
+reinstalls the tests; run them from this checkout if needed after cleanup.
+Configuration, virtual environments, images and session/user storage are preserved.
+
 This updates an existing installation: it tests staged code in a temporary
 virtual environment, backs up host code and the installed virtual environment
 under `/opt/ephemio-backup.*`, installs requirements and code, then restarts only
@@ -126,3 +134,67 @@ worker startup. After deploying, reopen the desktop from Ephemio once to replace
 any cookie previously issued with a five-minute Max-Age. No image rebuild is
 required for this browser-access change. Legacy portal renewal still works but
 is unnecessary. Logout revocation still requires delivery to the host.
+
+### Companion storage and applications
+
+Rebuild the common image layer and update the worker together. New containers
+mount `state/users/<portal-owner-id>` at `/mnt/ephemio-user`. This directory is
+retained when a desktop is deleted; back it up and manage account deletion and
+capacity separately. Existing containers need to be recreated to receive it.
+Storage is local to one host; scheduling on another host does not transfer files.
+
+The companion's User storage tab connects a `/config/Documents` shortcut to the retained
+`Documents` directory. Disconnect restores an empty local Documents folder. Connecting replaces an empty
+local folder; existing local files must be moved first. Disconnect does not close
+open handles or remove the
+underlying mount. This is a desktop convenience, not an isolation boundary.
+FTP, GDrive, OneDrive, Dropbox, Mega, pCloud and ownCloud synchronization and
+user backend configuration remain future work.
+
+The opt-in Chromium launcher uses a separate retained user-data directory and
+`--password-store=basic` so ephemeral desktop keyrings do not prevent reuse.
+Treat the entire directory as sensitive: it contains history, cookies and site
+data without desktop keyring protection. Chromium must already be installed.
+Use the same Chromium version/profile across sessions; only one persistent
+browser may run per owner, enforced by flock. Close the browser normally before
+ending a session. Existing ephemeral profiles are not migrated; websites can
+revoke or expire authentication, including WhatsApp linked devices. Unchecking
+the option disables the launcher, but does not erase an existing saved profile.
+See Chromium's [user-data directory documentation](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md).
+
+TCP details show public established sockets grouped by remote IP, with combined
+ports and a connection count. Private and local remote addresses are hidden.
+These snapshots are not an audit log. Timestamps are
+first observation in the companion, not kernel connection creation times.
+Incoming direction is inferred from local listening ports. Countries require
+optional Python `geoip2` and `/usr/share/GeoIP/GeoLite2-Country.mmdb` inside the
+image; without them public addresses display an explicit unknown value. No
+remote service receives the user's connection addresses.
+
+The small app catalog installs allowlisted packages using apt or dnf and the
+image's passwordless sudo. Installations last for the current disposable session;
+repository availability and host resource limits still apply.
+
+### Account defaults and storage browsing
+
+The portal snapshots `linux_username`, `full_name`, and `hostname` when requesting
+new desktops, including background synchronization retries. The worker migrates
+its SQLite schema additively and treats these settings as immutable per session.
+Existing desktops retain their current identity. If another non-deleted desktop
+for the same owner uses the requested hostname on this host, provisioning adds a
+UTC creation timestamp and session ID suffix.
+
+Rebuild each deployed desktop image with the updated `images/common` layer to
+apply Linux identities. Its startup hook exposes the selected username and full
+name for UID/GID 1000, keeps `/config` as home, and preserves supplementary groups.
+Webtop's `abc` remains an alias for its internal startup scripts. The worker uses
+numeric UID 1000 for guest operations. Image-specific reserved names fail startup.
+A full desktop startup check for each rebuilt image is required before rollout.
+
+The authenticated portal calls `GET /agent/v1/storage` with the user's owner ID
+and relative `path` to browse `state/users/<owner>`, independently of session
+lifetime. `download: true` returns base64 content for regular files up to 16 MiB.
+Directory traversal, symlinks, hard links, and special files are rejected; folder
+listings are limited to fewer than 1,000 visible entries. The portal authorizes
+host selection against the signed-in user's desktop history. This API does not
+modify user files.

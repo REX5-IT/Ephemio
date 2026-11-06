@@ -1,5 +1,7 @@
 """Ephemio POC: unprivileged streaming gateway and private Docker worker."""
 import argparse
+import base64
+import stat
 import asyncio
 import contextlib
 import hashlib
@@ -75,6 +77,9 @@ class Worker:
         self.db.commit()
         if 'profile' not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
             self.save("ALTER TABLE desktops ADD COLUMN profile TEXT NOT NULL DEFAULT 'ubuntu-kde'")
+        for column, definition in [('linux_username', "TEXT NOT NULL DEFAULT 'abc'"), ('full_name', "TEXT NOT NULL DEFAULT ''"), ('hostname', "TEXT NOT NULL DEFAULT 'ephemio'")]:
+            if column not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
+                self.save(f'ALTER TABLE desktops ADD COLUMN {column} {definition}')
         self.db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value REAL NOT NULL)')
         self.limits = {'slots': config['slots'], 'max_session_seconds': 3600, 'admit_memory_gib': 5,
                        'admit_disk_gib': 20, 'pressure_memory_gib': 2, 'pressure_disk_gib': 15,
@@ -159,7 +164,7 @@ class Worker:
                     'if (path := Path("/proc/net") / name).exists() '
                     'for line in path.read_text().splitlines()[1:]))'
                 )
-                _, connections = await command('docker', 'exec', '-u', 'abc', 'ephemio-' + sid,
+                _, connections = await command('docker', 'exec', '-u', '1000', 'ephemio-' + sid,
                                                '/usr/bin/python3', '-c', script, timeout=8)
                 usage['TCPConnections'] = int(connections)
                 self.guest_usage[sid] = (time.monotonic(), usage)
@@ -168,9 +173,61 @@ class Worker:
                       'max_remaining_seconds': int(self.limits['max_session_seconds'])}
             return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
+    def storage(self, data):
+        owner, path = data.get('owner', ''), data.get('path', '')
+        if not isinstance(owner, str) or not ID.fullmatch(owner) or not isinstance(path, str):
+            raise web.HTTPBadRequest()
+        parts = path.split('/') if path else []
+        if len(path) > 4096 or any(part in ('', '.', '..') or '\x00' in part for part in parts):
+            raise web.HTTPBadRequest(text='Invalid storage path.')
+        # Walk via directory descriptors: guest-controlled symlinks cannot escape,
+        # even if a running desktop replaces a directory during this request.
+        try:
+            with contextlib.ExitStack() as stack:
+                def opened(name, flags, parent=None):
+                    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                    stack.callback(os.close, fd)
+                    return fd
+                fd = opened(str(Path(self.c['state']) / 'users'), os.O_RDONLY | os.O_DIRECTORY)
+                fd = opened(owner, os.O_RDONLY | os.O_DIRECTORY, fd)
+                for i, part in enumerate(parts):
+                    directory = i < len(parts) - 1 or not data.get('download')
+                    fd = opened(part, os.O_RDONLY | (os.O_DIRECTORY if directory else 0), fd)
+                if data.get('download'):
+                    info = os.fstat(fd)
+                    if not parts or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise web.HTTPForbidden(text='Only regular files can be downloaded.')
+                    limit = 16 * 1024 * 1024
+                    if info.st_size > limit:
+                        raise web.HTTPBadRequest(text='Download files above 16 MiB from your desktop.')
+                    with os.fdopen(os.dup(fd), 'rb') as file:
+                        content = file.read(limit + 1)
+                    if len(content) > limit:
+                        raise web.HTTPBadRequest(text='File exceeds download limit.')
+                    return {'content': base64.b64encode(content).decode()}
+                entries = []
+                with os.scandir(fd) as items:
+                    for item in items:
+                        info = item.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1):
+                            entries.append({'name': item.name, 'directory': stat.S_ISDIR(info.st_mode), 'size': info.st_size})
+                        if len(entries) >= 1000:
+                            raise web.HTTPBadRequest(text='This folder has too many entries. Browse it from your desktop.')
+                return {'entries': sorted(entries, key=lambda item: (not item['directory'], item['name']))}
+        except FileNotFoundError:
+            if not parts and not data.get('download'):
+                return {'entries': []}
+            raise web.HTTPNotFound(text='File or folder not found.')
+        except OSError:
+            raise web.HTTPForbidden(text='File or folder cannot be opened.')
+
     async def rpc(self, request):
         data = await request.json() if request.can_read_body else {}
         path = request.path
+        if path == '/v1/storage':
+            if request.method != 'GET':
+                raise web.HTTPMethodNotAllowed(request.method, ['GET'])
+            return web.json_response(await asyncio.to_thread(self.storage, data))
         if path == '/v1/settings':
             if request.method == 'POST':
                 values = data.get('values', {})
@@ -269,7 +326,7 @@ class Worker:
                         'out=io.BytesIO(); im.convert("RGB").save(out,format="JPEG",quality=65); '
                         'print(base64.b64encode(out.getvalue()).decode())'
                     )
-                    _, image = await command('docker', 'exec', '-u', 'abc', 'ephemio-' + sid,
+                    _, image = await command('docker', 'exec', '-u', '1000', 'ephemio-' + sid,
                                              'python3', '-c', script, sid, timeout=7)
                     # Retain only live sessions, and never write screenshots to disk.
                     self.thumbnails = {key: value for key, value in self.thumbnails.items() if self.active(self.get(key))}
@@ -289,8 +346,15 @@ class Worker:
             profile = data.get('profile', 'ubuntu-kde')
             if not ID.fullmatch(str(owner)) or type(deadline) is not int:
                 raise web.HTTPBadRequest()
+            username, full_name, hostname = data.get('linux_username', 'abc'), data.get('full_name', ''), data.get('hostname', 'ephemio')
+            if not isinstance(username, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', username) or username in ('root', 'nobody'):
+                raise web.HTTPBadRequest(text='Invalid Linux username.')
+            if not isinstance(full_name, str) or len(full_name.encode()) > 100 or re.search(r'[\x00-\x1f\x7f:]', full_name):
+                raise web.HTTPBadRequest(text='Invalid full name.')
+            if not isinstance(hostname, str) or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', hostname):
+                raise web.HTTPBadRequest(text='Invalid hostname.')
             if row:
-                if row['owner'] != owner or row['deadline'] != deadline or row['profile'] != profile:
+                if row['owner'] != owner or row['deadline'] != deadline or row['profile'] != profile or row['linux_username'] != username or row['full_name'] != full_name or row['hostname'] != hostname:
                     raise web.HTTPConflict(text='Session specification differs from original request.')
                 return web.json_response(self.public(row))
             if not isinstance(profile, str) or profile not in self.profiles():
@@ -302,8 +366,8 @@ class Worker:
             count = self.db.execute("SELECT COUNT(*) FROM desktops WHERE state!='deleted'").fetchone()[0]
             if count >= self.limits['slots'] or memory_available() < self.limits['admit_memory_gib'] * GIB or shutil.disk_usage(self.c['state']).free < self.limits['admit_disk_gib'] * GIB:
                 raise web.HTTPConflict(text='Host has no desktop capacity.')
-            self.save('INSERT INTO desktops(id,owner,deadline,state,created,profile) VALUES (?,?,?,?,?,?)',
-                      (sid, owner, deadline, 'provisioning', int(time.time()), profile))
+            self.save('INSERT INTO desktops(id,owner,deadline,state,created,profile,linux_username,full_name,hostname) VALUES (?,?,?,?,?,?,?,?,?)',
+                      (sid, owner, deadline, 'provisioning', int(time.time()), profile, username, full_name, hostname))
             return web.json_response(self.public(self.get(sid)), status=202)
         if request.method == 'DELETE':
             if not row:
@@ -360,7 +424,18 @@ class Worker:
         if not obj:
             if self.get(sid)['state'] != 'provisioning':
                 return
-            await command('docker', 'run', '-d', '--name', name, '--label', LABEL, '--label', 'io.ephemio.session=' + sid,
+            # Owner IDs originate from the authenticated portal, never guest input.
+            if not ID.fullmatch(row['owner']):
+                raise RuntimeError('Invalid persistent storage owner.')
+            user_directory = Path(self.c['state']) / 'users' / row['owner']
+            user_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chown(user_directory, 1000, 1000)
+            hostname = row['hostname']
+            if self.db.execute("SELECT 1 FROM desktops WHERE id!=? AND owner=? AND hostname=? AND state!='deleted'", (sid, row['owner'], hostname)).fetchone():
+                hostname = hostname[:36].rstrip('-') + '-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime(row['created'])) + '-' + sid[:8]
+            await command('docker', 'run', '-d', '--name', name, '--hostname', hostname,
+                          '-e', 'EPHEMIO_LINUX_USERNAME=' + row['linux_username'], '-e', 'EPHEMIO_FULL_NAME=' + row['full_name'], '--label', LABEL, '--label', 'io.ephemio.session=' + sid,
+                          '--mount', 'type=bind,source=' + str(user_directory) + ',target=/mnt/ephemio-user',
                           '--mount', 'type=bind,source=' + self.guest_directory() + ',target=/run/ephemio-guest,readonly',
                           '-e', 'EPHEMIO_SESSION_ID=' + sid, '-e', 'EPHEMIO_GUEST_TOKEN=' + self.guest_token(sid),
                           '--network', name, '--publish', '127.0.0.1::3000', '--mount', 'type=volume,source=' + name + '-home,target=/config',
@@ -596,7 +671,7 @@ async def sync_loop(config):
                 for operation in work['operations']:
                     method = 'DELETE' if operation['desired'] == 'deleted' else 'PUT'
                     async with local.request(method, 'http://worker/v1/desktops/' + operation['id'],
-                                             json={'owner': operation['owner'], 'deadline': int(operation['deadline']), 'profile': operation.get('profile', 'ubuntu-kde')}) as resp:
+                                             json={'owner': operation['owner'], 'deadline': int(operation['deadline']), 'profile': operation.get('profile', 'ubuntu-kde'), 'linux_username': operation.get('linux_username', 'abc'), 'full_name': operation.get('full_name', ''), 'hostname': operation.get('hostname', 'ephemio')}) as resp:
                         if resp.status >= 500:
                             LOG.warning('Session synchronization deferred')
                 for login in work['revocations']:
