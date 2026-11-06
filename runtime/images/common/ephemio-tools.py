@@ -15,17 +15,6 @@ CATALOG = {'vlc': ('VLC media player', 'vlc'),
            'gimp': ('GIMP image editor', 'gimp'),
            'libreoffice': ('LibreOffice', 'libreoffice'),
            'filezilla': ('FileZilla FTP client', 'filezilla')}
-MICROSOFT_365_TRIAL_URL = 'https://www.microsoft.com/microsoft-365/try'
-
-
-def microsoft_365_trial():
-    """Open Microsoft's trial signup for Word and Excel in the browser."""
-    executable = shutil.which('xdg-open')
-    if not executable:
-        raise RuntimeError('No browser opener is installed in this desktop image.')
-    subprocess.run([executable, MICROSOFT_365_TRIAL_URL], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    return 'Microsoft 365 trial page opened. Use Word and Excel in your browser on Linux.'
 
 
 def refresh_documents():

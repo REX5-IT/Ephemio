@@ -71,6 +71,9 @@ Wine**. **Wine Settings** appears in the application menu. Both 32-bit and
 Wine initializes on first use and stores its environment in `/config/.wine`,
 which is deleted with session storage.
 
+KDE Wallet is disabled through `/etc/xdg/kwalletrc` to avoid wallet creation
+prompts in disposable desktops.
+
 Before deployment, verify Wine Settings, EXE and MSI installation, launching an
 installed app, reconnecting, and session volume removal in a fresh browser
 session. Record Wine version and resource use alongside the tested image ID.

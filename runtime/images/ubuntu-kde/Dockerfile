@@ -6,5 +6,6 @@ RUN dpkg --add-architecture i386 \
     && apt-get clean
 COPY ephemio-wine /usr/local/bin/ephemio-wine
 COPY ephemio-wine.desktop ephemio-wine-settings.desktop /usr/share/applications/
+COPY kwalletrc /etc/xdg/kwalletrc
 RUN chmod 755 /usr/local/bin/ephemio-wine \
     && update-desktop-database /usr/share/applications
