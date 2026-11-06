@@ -3,7 +3,7 @@ ENV DEBIAN_FRONTEND=noninteractive WINEPREFIX=/config/.wine
 RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y --no-install-recommends wine wine64 wine32:i386 fonts-wine shared-mime-info desktop-file-utils \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && apt-get clean
 COPY ephemio-wine /usr/local/bin/ephemio-wine
 COPY ephemio-wine.desktop ephemio-wine-settings.desktop /usr/share/applications/
 RUN chmod 755 /usr/local/bin/ephemio-wine \
