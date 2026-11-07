@@ -2,82 +2,15 @@
 """Local companion operations; no host credentials or external IP lookups."""
 import datetime
 import ipaddress
-import json
-import os
 from pathlib import Path
 import shutil
 import socket
 import subprocess
 
-ROOT = Path('/mnt/ephemio-user')
-DOCUMENTS = Path('/config/Documents')
 CATALOG = {'vlc': ('VLC media player', 'vlc'),
            'gimp': ('GIMP image editor', 'gimp'),
            'libreoffice': ('LibreOffice', 'libreoffice'),
            'filezilla': ('FileZilla FTP client', 'filezilla')}
-
-
-def refresh_documents():
-    """Ask the desktop to navigate to the current path after replacing its symlink.
-
-    File managers can keep displaying the resolved persistent directory after
-    Documents has been disconnected. ShowFolders navigates back to the local
-    Documents URI rather than merely refreshing that old resolved directory.
-    """
-    uri = DOCUMENTS.as_uri()
-    if shutil.which('gdbus'):
-        try:
-            result = subprocess.run(
-                ['gdbus', 'call', '--session', '--dest', 'org.freedesktop.FileManager1',
-                 '--object-path', '/org/freedesktop/FileManager1',
-                 '--method', 'org.freedesktop.FileManager1.ShowFolders',
-                 "['" + uri + "']", ''],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-            if result.returncode == 0:
-                return
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    if shutil.which('xdg-open'):
-        subprocess.Popen(['xdg-open', str(DOCUMENTS)], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-
-
-def storage(connect):
-    link = DOCUMENTS
-    if not ROOT.is_dir():
-        raise RuntimeError('Persistent storage requires an updated managed host.')
-    if link.is_symlink():
-        if link.resolve() != ROOT / 'Documents':
-            raise RuntimeError('/config/Documents points elsewhere; move it before connecting.')
-        if not connect:
-            link.unlink()
-    elif link.exists() and connect:
-        if not link.is_dir() or any(link.iterdir()):
-            raise RuntimeError('/config/Documents contains local files; move them before connecting User storage.')
-        link.rmdir()
-    if connect:
-        (ROOT / 'Documents').mkdir(exist_ok=True)
-        if not link.is_symlink():
-            link.symlink_to(ROOT / 'Documents', target_is_directory=True)
-    if not connect:
-        link.mkdir(exist_ok=True)
-    refresh_documents()
-    return 'User storage connected at /config/Documents.' if connect else 'User storage disconnected. Saved files are retained.'
-
-
-def browser():
-    executable = next((shutil.which(x) for x in ('chromium', 'chromium-browser', 'google-chrome') if shutil.which(x)), None)
-    if not executable:
-        raise RuntimeError('Chromium is not installed in this desktop image.')
-    if not ROOT.is_dir():
-        raise RuntimeError('Persistent storage is unavailable.')
-    profile = ROOT / 'Chromium'
-    profile.mkdir(mode=0o700, exist_ok=True)
-    # flock prevents simultaneous sessions from corrupting the shared profile.
-    subprocess.Popen(['flock', '-n', str(ROOT / 'chromium.lock'), executable,
-                      '--user-data-dir=' + str(profile), '--password-store=basic'],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    return 'Persistent Chromium launched (one session at a time). Close it normally to save data.'
 
 
 def install(key):

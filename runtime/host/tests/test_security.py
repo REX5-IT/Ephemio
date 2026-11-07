@@ -38,7 +38,7 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
 
     async def test_storage_isolation_and_special_files(self):
         import os
-        root = Path(self.temp.name) / 'users' / self.owner
+        root = Path(self.temp.name) / 'profiles' / self.owner
         root.mkdir(parents=True)
         (root / 'folder').mkdir()
         (root / 'folder' / 'hello.txt').write_text('hello')
@@ -63,6 +63,58 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
             file.truncate(16 * 1024 * 1024 + 1)
         self.assertEqual((await request('large', True)).status, 400)
 
+    async def test_profile_exclusivity_and_reuse_after_deletion(self):
+        sid = secrets.token_hex(16)
+        data = {'owner': self.owner, 'deadline': self.deadline}
+        self.worker.limits.update(slots=10, admit_disk_gib=0, admit_memory_gib=0)
+        response = await self.client.put('/v1/desktops/' + sid, json=data)
+        self.assertEqual(response.status, 409)
+        home = self.worker.home_directory(self.worker.get(self.sid))
+        home.mkdir(parents=True)
+        (home / '.wallpaper-setting').write_text('saved')
+        with patch.object(self.worker, 'inspect', AsyncMock(return_value=None)):
+            await self.worker.remove(self.sid)
+        self.assertEqual((home / '.wallpaper-setting').read_text(), 'saved')
+        self.assertEqual((await self.client.put('/v1/desktops/' + sid, json=data)).status, 202)
+        self.assertEqual(self.worker.home_directory(self.worker.get(sid)), home)
+        self.assertNotEqual(self.worker.home_directory({'owner': self.owner, 'profile': 'mint-cinnamon', 'persistent': True}), home)
+
+    async def test_disposable_choice_is_immutable_and_cleanup_preserves_saved_profile(self):
+        self.worker.limits.update(slots=10, admit_disk_gib=0, admit_memory_gib=0)
+        sid = secrets.token_hex(16)
+        data = {'owner': self.owner, 'deadline': self.deadline, 'persistent': False}
+        path = '/v1/desktops/' + sid
+        for invalid in ('false', 0, None):
+            self.assertEqual((await self.client.put(path, json={**data, 'persistent': invalid})).status, 400)
+        response = await self.client.put(path, json=data)
+        self.assertEqual(response.status, 202)
+        self.assertIs((await response.json())['persistent'], False)
+        self.assertEqual((await self.client.put(path, json=data)).status, 200)
+        self.assertEqual((await self.client.put(path, json={**data, 'persistent': True})).status, 409)
+        row = self.worker.get(sid)
+        home = self.worker.home_directory(row)
+        self.assertEqual(home, Path(self.temp.name) / 'sessions' / sid)
+        home.mkdir(parents=True)
+        (home / 'temporary').write_text('discard')
+        saved = self.worker.home_directory(self.worker.get(self.sid))
+        saved.mkdir(parents=True)
+        (saved / 'keep').write_text('saved')
+        # A symlink in a disposable home must not delete files in the saved profile.
+        (home / 'link').symlink_to(saved, target_is_directory=True)
+        self.worker.c['signing_key'] = 'test-only'
+        container = {'State': {'Running': True}, 'NetworkSettings': {'Ports': {'3000/tcp': [{'HostPort': '12345'}]}}}
+        with patch.object(self.worker, 'inspect', AsyncMock(side_effect=[{'exists': True}, None, container])), \
+                patch.object(service, 'command', AsyncMock(return_value=(0, ''))) as command, \
+                patch.object(service.os, 'chown'), patch.object(service, 'ClientSession', side_effect=OSError):
+            await self.worker.provision(row)
+        self.assertIn('type=bind,source=' + str(home) + ',target=/config', command.call_args.args)
+        self.assertIn('EPHEMIO_PERSISTENT=0', command.call_args.args)
+        with patch.object(self.worker, 'inspect', AsyncMock(return_value=None)):
+            await self.worker.remove(sid)
+        self.assertFalse(home.exists())
+        self.assertEqual((saved / 'keep').read_text(), 'saved')
+        self.assertEqual(self.worker.get(sid)['state'], 'deleted')
+
     async def test_new_session_identity_validation_and_immutability(self):
         sid = secrets.token_hex(16)
         data = {'owner': self.owner, 'deadline': self.deadline, 'linux_username': 'alice', 'full_name': 'Alice Example', 'hostname': 'my-desktop'}
@@ -70,6 +122,7 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
         self.worker.limits['admit_disk_gib'] = 0
         self.worker.limits['admit_memory_gib'] = 0
         path = '/v1/desktops/' + sid
+        self.worker.save("UPDATE desktops SET state='deleted' WHERE id=?", (self.sid,))
         for key, value in [('linux_username', 'root'), ('linux_username', 'bad:name'), ('full_name', 'bad:name'), ('hostname', '-bad')]:
             response = await self.client.put(path, json={**data, key: value})
             self.assertEqual(response.status, 400)
@@ -85,13 +138,16 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
         self.worker.save("INSERT INTO desktops(id,owner,deadline,state,created,linux_username,full_name,hostname) VALUES(?,?,?,?,?,?,?,?)",
                          (sid, self.owner, self.deadline, 'provisioning', int(time.time()), 'alice', 'Alice Example', 'ephemio'))
         container = {'State': {'Running': True}, 'NetworkSettings': {'Ports': {'3000/tcp': [{'HostPort': '12345'}]}}}
-        with patch.object(self.worker, 'inspect', AsyncMock(side_effect=[{'exists': True}, {'exists': True}, None, container])), \
+        with patch.object(self.worker, 'inspect', AsyncMock(side_effect=[{'exists': True}, None, container])), \
                 patch.object(service, 'command', AsyncMock(return_value=(0, ''))) as command, \
                 patch.object(service.os, 'chown'), patch.object(service, 'ClientSession', side_effect=OSError):
             await self.worker.provision(self.worker.get(sid))
         args = command.call_args.args
         self.assertIn('EPHEMIO_LINUX_USERNAME=alice', args)
         self.assertIn('EPHEMIO_FULL_NAME=Alice Example', args)
+        expected = str(Path(self.temp.name) / 'profiles' / self.owner / 'ubuntu-kde')
+        self.assertIn('type=bind,source=' + expected + ',target=/config', args)
+        self.assertFalse(any('target=/mnt/ephemio-user' in arg or 'type=volume' in arg for arg in args))
         hostname = args[args.index('--hostname') + 1]
         self.assertTrue(hostname.startswith('ephemio-'))
         self.assertLessEqual(len(hostname), 63)
@@ -239,7 +295,7 @@ class GuestAuthorization(unittest.IsolatedAsyncioTestCase):
         self.worker.guest_usage.clear()
         stats = {'CPUPerc': '12%', 'MemUsage': '1GiB / 3GiB', 'NetIO': '1kB / 2kB', 'BlockIO': '0B / 1kB'}
         with patch.object(service, 'command', AsyncMock(side_effect=[(0, json.dumps(stats)), (0, '1024 /home\n2048 /layer'), (0, '7')])) as command, patch.object(
-                self.worker, 'inspect', AsyncMock(side_effect=[{'GraphDriver': {'Data': {'UpperDir': '/layer'}}}, {'Mountpoint': '/home'}])):
+                self.worker, 'inspect', AsyncMock(side_effect=[{'GraphDriver': {'Data': {'UpperDir': '/layer'}}}])):
             for _ in range(2):
                 response = await self.guest_client.get('/guest/' + self.sid + '/status', headers=self.headers)
                 self.assertEqual(response.status, 200)
@@ -248,6 +304,7 @@ class GuestAuthorization(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(usage['CPUPerc'], '12%')
                 self.assertEqual(usage['TCPConnections'], 7)
             self.assertEqual(command.await_count, 3)
+            self.assertEqual(command.await_args_list[1].args[2], str(self.worker.home_directory(self.worker.get(self.sid))))
             args = command.await_args_list[-1].args
             self.assertEqual(args[:4], ('docker', 'exec', '-u', '1000'))
             self.assertEqual(args[4], 'ephemio-' + self.sid)

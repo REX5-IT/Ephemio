@@ -5,10 +5,11 @@ MIT-licensed runtime for ephemeral Linux desktops in the browser.
 Ephemio is a product of [REX5](https://rex5.com/).
 
 The Ephemio POC lets invited users launch a fresh Linux desktop in their browser,
-use it for a limited session, and discard it when they are done. Installed software
-and ordinary desktop files belong to that session. Optional retained user storage
-and an opt-in persistent Chromium profile can preserve selected data on the same
-host. Download anything else you want to keep before the desktop expires.
+use it for a limited session, and discard the container when they are done.
+At launch, choose a saved or disposable home profile. Saved profiles persist
+per owner, desktop type and host,
+including files, wallpaper, application settings and normal browser data. Disposable profiles are deleted with the session. System
+packages and changes outside the home directory remain disposable.
 
 This repository contains the host runtime, desktop image definitions, companion
 app and deployment templates. The PHP customer/admin portal is maintained
@@ -29,7 +30,7 @@ The core experience is a temporary personal desktop:
 3. Use its browser, applications, terminal, audio, and file transfer.
 4. Reconnect to the same desktop while the session remains active.
 5. End the session explicitly or let its time limit expire.
-6. Remove the desktop and its session storage, and confirm cleanup.
+6. Remove the desktop container and confirm cleanup; retain saved profiles and delete disposable ones.
 
 Closing a browser tab disconnects the viewer; it does not immediately destroy
 an active session. The service must keep showing the expiry time and enforce
@@ -47,8 +48,7 @@ minutes. Idle timeout, resource tiers, and pricing remain to be decided.
 | Session provisioning, expiry, and verified cleanup | Durable host worker, SQLite state, recovery and fallback timer |
 | Authenticated desktop gateway | Signed host API, single-use tickets, session-bound browser grants and periodic WebSocket authorization |
 | Desktop companion | Countdown, resource usage, extensions, pause, termination and public TCP connection details |
-| Retained user storage | Per-owner, per-host bind mount, Documents shortcut and read-only storage browsing API |
-| Persistent Chromium | Opt-in retained browser profile; requires Chromium and stores sensitive browser data without desktop keyring protection |
+| Retained user profiles | Full home per owner/desktop type/host, including desktop and browser settings; read-only storage browsing API |
 | Applications | Session-local VLC, GIMP, LibreOffice and FileZilla catalog; KDE image adds Wine for compatible Windows applications |
 | Identity and host administration | Session username/full name/hostname; host settings, usage inspection, pause/resume and thumbnails |
 | Customer isolation | POC bridge filtering and container limits; public multi-tenant isolation pending |
@@ -99,8 +99,8 @@ The separate portal supplies customer accounts and launch/reconnect/end controls
 Usage accounting is a later milestone.
 
 Configured hosts advertise their supported desktop profiles and capacity.
-The external PHP portal requests a separate environment and disposable home
-storage for each session, while the worker mounts retained storage for its owner.
+The external PHP portal requests a separate environment for each session, while
+the worker mounts the retained home profile for its owner and desktop type.
 An authenticated HTTPS gateway routes each tester to their own active desktop.
 The host worker provisions environments and enforces expiry independently of
 the browser connection. The host registry supports additional configured hosts.
@@ -112,7 +112,7 @@ requested -> provisioning -> active -> deleting -> deleted
 ```
 
 Provisioning failures also enter cleanup. `deleted` means the environment and
-its disposable session storage have been observed removed. Retained owner storage
+its disposable container resources have been observed removed. Retained owner storage
 is preserved and requires a separate retention/account-deletion policy. Failed cleanup must remain
 visible and be retried after worker or host restarts. Access must be revoked
 when a session ends, even if storage cleanup is still in progress.

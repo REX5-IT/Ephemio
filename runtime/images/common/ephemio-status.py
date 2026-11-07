@@ -184,7 +184,7 @@ class Companion(QtWidgets.QWidget):
     ACTIONS = (
         ('extend', 'Extend session', 'Add up to 15 minutes within the host limit.', 'extend'),
         ('pause', 'Pause desktop', 'Resume from Ephemio. Your session timer keeps running.', 'pause'),
-        ('terminate', 'Terminate desktop', 'End this session immediately and delete its files.', 'stop'),
+        ('terminate', 'Terminate desktop', 'End this session; disposable profiles are deleted.', 'stop'),
     )
 
     def __init__(self):
@@ -256,27 +256,9 @@ class Companion(QtWidgets.QWidget):
         storage_layout = QtWidgets.QVBoxLayout(storage_page)
         self.user_storage = label('▣  User storage', 'brand')
         storage_layout.addWidget(self.user_storage)
-        detail = label('Your files stay on this host across sessions. Connect to show them in /config/Documents. Disconnect restores a local Documents folder; open files and the backing directory remain accessible.', 'muted')
+        detail = label('Saved profile sessions retain files, wallpaper, settings and browser data on this host. Disposable sessions delete the entire home when they end. The storage mode is selected at launch. System package installations are not retained.', 'muted')
         detail.setWordWrap(True)
         storage_layout.addWidget(detail)
-        for title, callback in (
-                ('⇥ Connect User storage', lambda: tools.storage(True)),
-                ('⏏ Disconnect User storage', lambda: tools.storage(False))):
-            storage_layout.addWidget(self.local_button(title, callback))
-        consent = QtWidgets.QCheckBox('Keep Chromium history, cookies and website sign-ins')
-        storage_layout.addWidget(consent)
-        warning = label('Opt-in browser profile stores sensitive login data without desktop keyring encryption. Use only on a trusted host. Existing browser windows are separate. Website sign-ins may expire.', 'muted')
-        warning.setWordWrap(True)
-        storage_layout.addWidget(warning)
-        launch = self.local_button('Launch persistent Chromium', tools.browser)
-        launch.setEnabled(False)
-        consent.toggled.connect(launch.setEnabled)
-        self.browser_consent = consent
-        self.browser_button = launch
-        storage_layout.addWidget(launch)
-        future_sync = label('Storage backend: local directory. Cloud / FTP sync is planned; no remote account is connected.', 'muted')
-        future_sync.setWordWrap(True)
-        storage_layout.addWidget(future_sync)
         storage_layout.addStretch()
         self.tabs.addTab(storage_page, 'User storage')
         catalog = QtWidgets.QWidget()
@@ -481,7 +463,7 @@ class Companion(QtWidgets.QWidget):
         if action != 'status':
             messages = {'extend': 'Extending your session…',
                         'pause': 'Pausing… Resume from Ephemio. Your timer keeps running.',
-                        'terminate': 'Terminating… Desktop files will be deleted.'}
+                        'terminate': 'Terminating… Applying the selected storage policy.'}
             self.notify(messages[action])
             for button in self.buttons:
                 button.setEnabled(False)
@@ -512,8 +494,7 @@ class Companion(QtWidgets.QWidget):
         self.tcp.setText(f"TCP connections    {usage.get('TCPConnections', '—')} established")
 
     def tick(self):
-        connected = tools.DOCUMENTS.is_symlink() and tools.DOCUMENTS.resolve() == tools.ROOT / 'Documents'
-        self.user_storage.setText('▣  User storage · ' + ('Connected' if connected else 'Disconnected'))
+        self.user_storage.setText('▣  User profile · ' + ('Saved' if os.environ.get('EPHEMIO_PERSISTENT') == '1' else 'Disposable'))
         if self.local_future and self.local_future.done():
             try:
                 self.notify(self.local_future.result())
@@ -523,7 +504,6 @@ class Companion(QtWidgets.QWidget):
             self.operation.hide()
             for button in self.local_buttons:
                 button.setEnabled(True)
-            self.browser_button.setEnabled(self.browser_consent.isChecked())
         if self.future and self.future.done():
             action = self.action
             try:

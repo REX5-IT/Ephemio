@@ -73,7 +73,7 @@ class Worker:
         ''')
         if 'profile' not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
             self.save("ALTER TABLE desktops ADD COLUMN profile TEXT NOT NULL DEFAULT 'ubuntu-kde'")
-        for column, definition in [('linux_username', "TEXT NOT NULL DEFAULT 'abc'"), ('full_name', "TEXT NOT NULL DEFAULT ''"), ('hostname', "TEXT NOT NULL DEFAULT 'ephemio'")]:
+        for column, definition in [('linux_username', "TEXT NOT NULL DEFAULT 'abc'"), ('full_name', "TEXT NOT NULL DEFAULT ''"), ('hostname', "TEXT NOT NULL DEFAULT 'ephemio'"), ('persistent', 'INTEGER NOT NULL DEFAULT 1')]:
             if column not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
                 self.save(f'ALTER TABLE desktops ADD COLUMN {column} {definition}')
         self.db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value REAL NOT NULL)')
@@ -97,13 +97,20 @@ class Worker:
         self.db.commit()
 
     def public(self, row):
-        return {key: row[key] for key in ('id', 'owner', 'deadline', 'state', 'reason', 'profile')}
+        result = {key: row[key] for key in ('id', 'owner', 'deadline', 'state', 'reason', 'profile')}
+        result['persistent'] = bool(row['persistent'])
+        return result
 
     def profiles(self):
         return self.c.get('profiles', {'ubuntu-kde': {'image': self.c.get('image', ''), 'process': 'plasmashell'}})
 
     def active(self, row):
         return self.ready and row and row['state'] == 'active' and row['deadline'] > time.time()
+
+    def home_directory(self, row):
+        if not row['persistent']:
+            return Path(self.c['state']) / 'sessions' / row['id']
+        return Path(self.c['state']) / 'profiles' / row['owner'] / row['profile']
 
     def guest_token(self, sid):
         return hmac.new(self.c['signing_key'].encode(), ('guest:' + sid).encode(), hashlib.sha256).hexdigest()
@@ -147,8 +154,7 @@ class Worker:
             if not cached or time.monotonic() - cached[0] >= 10:
                 _, stats = await command('docker', 'stats', '--no-stream', '--format', '{{json .}}', 'ephemio-' + sid, timeout=8)
                 obj = await self.inspect('container', 'ephemio-' + sid)
-                volume = await self.inspect('volume', 'ephemio-' + sid + '-home')
-                _, used = await command('du', '-sb', volume['Mountpoint'], obj['GraphDriver']['Data']['UpperDir'], timeout=8)
+                _, used = await command('du', '-sb', str(self.home_directory(row)), obj['GraphDriver']['Data']['UpperDir'], timeout=8)
                 usage = json.loads(stats)
                 usage['DiskBytes'] = sum(int(line.split()[0]) for line in used.splitlines())
                 usage['DiskLimitBytes'] = int(self.limits['storage_limit_gib'] * GIB)
@@ -184,7 +190,7 @@ class Worker:
                     fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
                     stack.callback(os.close, fd)
                     return fd
-                fd = opened(str(Path(self.c['state']) / 'users'), os.O_RDONLY | os.O_DIRECTORY)
+                fd = opened(str(Path(self.c['state']) / 'profiles'), os.O_RDONLY | os.O_DIRECTORY)
                 fd = opened(owner, os.O_RDONLY | os.O_DIRECTORY, fd)
                 for i, part in enumerate(parts):
                     directory = i < len(parts) - 1 or not data.get('download')
@@ -337,6 +343,9 @@ class Worker:
         if request.method == 'PUT':
             owner, deadline = data.get('owner', ''), data.get('deadline', 0)
             profile = data.get('profile', 'ubuntu-kde')
+            persistent = data.get('persistent', True)
+            if type(persistent) is not bool:
+                raise web.HTTPBadRequest(text='persistent must be a boolean.')
             if not ID.fullmatch(str(owner)) or type(deadline) is not int:
                 raise web.HTTPBadRequest()
             username, full_name, hostname = data.get('linux_username', 'abc'), data.get('full_name', ''), data.get('hostname', 'ephemio')
@@ -347,7 +356,7 @@ class Worker:
             if not isinstance(hostname, str) or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', hostname):
                 raise web.HTTPBadRequest(text='Invalid hostname.')
             if row:
-                if row['owner'] != owner or row['deadline'] != deadline or row['profile'] != profile or row['linux_username'] != username or row['full_name'] != full_name or row['hostname'] != hostname:
+                if bool(row['persistent']) != persistent or row['owner'] != owner or row['deadline'] != deadline or row['profile'] != profile or row['linux_username'] != username or row['full_name'] != full_name or row['hostname'] != hostname:
                     raise web.HTTPConflict(text='Session specification differs from original request.')
                 return web.json_response(self.public(row))
             if not isinstance(profile, str) or profile not in self.profiles():
@@ -356,11 +365,13 @@ class Worker:
                 raise web.HTTPServiceUnavailable(text='Host is recovering.')
             if not (time.time() < deadline <= time.time() + self.limits['max_session_seconds']):
                 raise web.HTTPBadRequest(text='Invalid deadline.')
+            if persistent and self.db.execute("SELECT 1 FROM desktops WHERE owner=? AND profile=? AND persistent=1 AND state!='deleted'", (owner, profile)).fetchone():
+                raise web.HTTPConflict(text='This user profile is already in use.')
             count = self.db.execute("SELECT COUNT(*) FROM desktops WHERE state!='deleted'").fetchone()[0]
             if count >= self.limits['slots'] or memory_available() < self.limits['admit_memory_gib'] * GIB or shutil.disk_usage(self.c['state']).free < self.limits['admit_disk_gib'] * GIB:
                 raise web.HTTPConflict(text='Host has no desktop capacity.')
-            self.save('INSERT INTO desktops(id,owner,deadline,state,created,profile,linux_username,full_name,hostname) VALUES (?,?,?,?,?,?,?,?,?)',
-                      (sid, owner, deadline, 'provisioning', int(time.time()), profile, username, full_name, hostname))
+            self.save('INSERT INTO desktops(id,owner,deadline,state,created,profile,linux_username,full_name,hostname,persistent) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                      (sid, owner, deadline, 'provisioning', int(time.time()), profile, username, full_name, hostname, int(persistent)))
             return web.json_response(self.public(self.get(sid)), status=202)
         if request.method == 'DELETE':
             if not row:
@@ -398,6 +409,11 @@ class Worker:
             await command('docker', 'volume', 'rm', name + '-home')
         if await self.inspect('network', name):
             await command('docker', 'network', 'rm', name)
+        row = self.get(sid)
+        if row and not row['persistent']:
+            directory = self.home_directory(row)
+            if directory.exists():
+                await asyncio.to_thread(shutil.rmtree, directory)
         with self.db:
             self.db.execute('DELETE FROM grants WHERE desktop=?', (sid,))
             self.db.execute('DELETE FROM tickets WHERE desktop=?', (sid,))
@@ -411,8 +427,6 @@ class Worker:
         if not await self.inspect('network', name):
             await command('docker', 'network', 'create', '--label', LABEL, '--label', 'io.ephemio.session=' + sid,
                           '--opt', 'com.docker.network.bridge.name=eph' + sid[:10], name)
-        if not await self.inspect('volume', name + '-home'):
-            await command('docker', 'volume', 'create', '--label', LABEL, '--label', 'io.ephemio.session=' + sid, name + '-home')
         obj = await self.inspect('container', name)
         if not obj:
             if self.get(sid)['state'] != 'provisioning':
@@ -420,18 +434,22 @@ class Worker:
             # Owner IDs originate from the authenticated portal, never guest input.
             if not ID.fullmatch(row['owner']):
                 raise RuntimeError('Invalid persistent storage owner.')
-            user_directory = Path(self.c['state']) / 'users' / row['owner']
-            user_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            user_directory = self.home_directory(row)
+            user_directory.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            user_directory.mkdir(exist_ok=True, mode=0o700)
+            if user_directory.is_symlink():
+                raise RuntimeError('Profile directory must not be a symlink.')
             os.chown(user_directory, 1000, 1000)
             hostname = row['hostname']
             if self.db.execute("SELECT 1 FROM desktops WHERE id!=? AND owner=? AND hostname=? AND state!='deleted'", (sid, row['owner'], hostname)).fetchone():
                 hostname = hostname[:36].rstrip('-') + '-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime(row['created'])) + '-' + sid[:8]
             await command('docker', 'run', '-d', '--name', name, '--hostname', hostname,
                           '-e', 'EPHEMIO_LINUX_USERNAME=' + row['linux_username'], '-e', 'EPHEMIO_FULL_NAME=' + row['full_name'], '--label', LABEL, '--label', 'io.ephemio.session=' + sid,
-                          '--mount', 'type=bind,source=' + str(user_directory) + ',target=/mnt/ephemio-user',
+                          '--mount', 'type=bind,source=' + str(user_directory) + ',target=/config',
                           '--mount', 'type=bind,source=' + self.guest_directory() + ',target=/run/ephemio-guest,readonly',
+                          '-e', 'EPHEMIO_PERSISTENT=' + ('1' if row['persistent'] else '0'),
                           '-e', 'EPHEMIO_SESSION_ID=' + sid, '-e', 'EPHEMIO_GUEST_TOKEN=' + self.guest_token(sid),
-                          '--network', name, '--publish', '127.0.0.1::3000', '--mount', 'type=volume,source=' + name + '-home,target=/config',
+                          '--network', name, '--publish', '127.0.0.1::3000',
                           '--cpus', str(self.limits['cpu_limit']), '--memory', str(int(self.limits['memory_gib'] * GIB)), '--memory-swap', str(int(self.limits['memory_gib'] * GIB)), '--shm-size', str(int(self.limits['shm_gib'] * GIB)), '--pids-limit', str(int(profile.get('pids_limit', self.limits['pids_limit']))),
                           '--restart', 'no', '--log-opt', 'max-size=10m', '--log-opt', 'max-file=2',
                           '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1',
@@ -483,8 +501,7 @@ class Worker:
                     if not obj or not obj['State']['Running']:
                         self.save("UPDATE desktops SET state='deleting',reason='container_exited' WHERE id=?", (sid,))
                     else:
-                        volume = await self.inspect('volume', 'ephemio-' + sid + '-home')
-                        _, used = await command('du', '-sb', volume['Mountpoint'], obj['GraphDriver']['Data']['UpperDir'], timeout=20)
+                        _, used = await command('du', '-sb', str(self.home_directory(row)), obj['GraphDriver']['Data']['UpperDir'], timeout=20)
                         if sum(int(line.split()[0]) for line in used.splitlines()) > self.limits['storage_limit_gib'] * GIB:
                             self.save("UPDATE desktops SET state='deleting',reason='storage_limit' WHERE id=?", (sid,))
                 row = self.get(sid)
@@ -660,7 +677,7 @@ async def sync_loop(config):
                 for operation in work['operations']:
                     method = 'DELETE' if operation['desired'] == 'deleted' else 'PUT'
                     async with local.request(method, 'http://worker/v1/desktops/' + operation['id'],
-                                             json={'owner': operation['owner'], 'deadline': int(operation['deadline']), 'profile': operation.get('profile', 'ubuntu-kde'), 'linux_username': operation.get('linux_username', 'abc'), 'full_name': operation.get('full_name', ''), 'hostname': operation.get('hostname', 'ephemio')}) as resp:
+                                             json={'owner': operation['owner'], 'deadline': int(operation['deadline']), 'profile': operation.get('profile', 'ubuntu-kde'), 'persistent': operation.get('persistent', True), 'linux_username': operation.get('linux_username', 'abc'), 'full_name': operation.get('full_name', ''), 'hostname': operation.get('hostname', 'ephemio')}) as resp:
                         if resp.status >= 500:
                             LOG.warning('Session synchronization deferred')
                 for login in work['revocations']:

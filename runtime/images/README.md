@@ -69,7 +69,7 @@ Users upload or download EXE/MSI installers and choose **Open With → Run with
 Wine**. **Wine Settings** appears in the application menu. Both 32-bit and
 64-bit packages are included. Compatibility varies; users can try any app.
 Wine initializes on first use and stores its environment in `/config/.wine`,
-which is deleted with session storage.
+which persists in the saved home profile.
 
 KDE Wallet is disabled through `/etc/xdg/kwalletrc` to avoid wallet creation
 prompts in disposable desktops.
@@ -106,7 +106,7 @@ countdown updates continuously and the window reappears below five minutes.
 Extend adds up to 15 minutes, capped at the host's `max_session_seconds` of
 remaining time. Pause freezes the desktop and revokes browser access; the timer
 continues and users resume from Ephemio. Terminate immediately removes the
-desktop and its storage. These actions do not require confirmation dialogs.
+desktop container; the saved home profile is retained. These actions do not require confirmation dialogs.
 
 The app needs a live desktop: it cannot remain visible after the host deletes
 or pauses its container. Browser access lasts until the desktop deadline or explicit revocation.
@@ -117,3 +117,18 @@ its session cookie.
 Webtop's nested KDE Wayland startup reads only user autostart files, rather
 than `/etc/xdg/autostart`. The companion layer includes its entry explicitly
 in that startup loop. Rebuild the companion image to apply this startup fix.
+
+## Retained home profiles
+
+Saved-profile sessions mount a retained home at `/config`, separately for each owner,
+desktop type and host. Wallpaper, desktop preferences, ordinary browser data and
+application settings persist without Documents shortcuts or special Chromium
+launchers. GNOME/Cinnamon theme and favorites defaults are applied only on first
+profile initialization; screen locking and idle suspension remain disabled.
+System package installations remain disposable. Rebuild base and common layers,
+then verify persistence across new containers for every profile. Old storage is
+not migrated; see the host rollout instructions.
+
+At launch, users can instead select a disposable profile. It starts empty, does
+not mount the saved profile, and is deleted when the session ends. The companion
+shows the selected mode.

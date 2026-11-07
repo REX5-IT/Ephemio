@@ -4,8 +4,12 @@ unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
 exec dbus-run-session -- bash -c '
   gsettings set org.cinnamon.desktop.session idle-delay 0
   gsettings set org.cinnamon.desktop.screensaver lock-enabled false
-  gsettings set org.cinnamon.desktop.interface gtk-theme Mint-Y
-  gsettings set org.cinnamon.desktop.interface icon-theme Mint-Y
-  gsettings set org.cinnamon.theme name Mint-Y
+  if [ ! -f /config/.config/ephemio-desktop-defaults ]; then
+    gsettings set org.cinnamon.desktop.interface gtk-theme Mint-Y
+    gsettings set org.cinnamon.desktop.interface icon-theme Mint-Y
+    gsettings set org.cinnamon.theme name Mint-Y
+    mkdir -p /config/.config
+    touch /config/.config/ephemio-desktop-defaults
+  fi
   exec cinnamon-session
 '

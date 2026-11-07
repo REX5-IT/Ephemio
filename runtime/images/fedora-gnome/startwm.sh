@@ -6,10 +6,14 @@ chmod 1777 /tmp/.X11-unix
 exec dbus-run-session -- bash -c '
   gsettings set org.gnome.desktop.session idle-delay 0
   gsettings set org.gnome.desktop.screensaver lock-enabled false
-  gsettings set org.gnome.desktop.interface enable-animations false
-  gsettings set org.gnome.shell welcome-dialog-last-shown-version "999"
-  gsettings set org.gnome.desktop.search-providers disable-external true
-  gsettings set org.gnome.shell favorite-apps "[\"org.mozilla.firefox.desktop\", \"org.gnome.Nautilus.desktop\", \"org.gnome.Terminal.desktop\", \"org.gnome.TextEditor.desktop\"]"
+  if [ ! -f /config/.config/ephemio-desktop-defaults ]; then
+    gsettings set org.gnome.desktop.interface enable-animations false
+    gsettings set org.gnome.shell welcome-dialog-last-shown-version "999"
+    gsettings set org.gnome.desktop.search-providers disable-external true
+    gsettings set org.gnome.shell favorite-apps "[\"org.mozilla.firefox.desktop\", \"org.gnome.Nautilus.desktop\", \"org.gnome.Terminal.desktop\", \"org.gnome.TextEditor.desktop\"]"
+    mkdir -p /config/.config
+    touch /config/.config/ephemio-desktop-defaults
+  fi
   pipewire &
   while [ ! -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do sleep 0.2; done
   wireplumber &

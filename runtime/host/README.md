@@ -141,30 +141,33 @@ reload already-open dashboard pages so cached scripts stop sending renewal reque
 
 ### Companion storage and applications
 
-Rebuild the common image layer and update the worker together. New containers
-mount `state/users/<portal-owner-id>` at `/mnt/ephemio-user`. This directory is
-retained when a desktop is deleted; back it up and manage account deletion and
-capacity separately. Existing containers need to be recreated to receive it.
-Storage is local to one host; scheduling on another host does not transfer files.
+Rebuild desktop bases and the common companion layer, and update the worker and
+portal together. Sessions with `persistent: true` bind `state/profiles/<owner>/<profile>` directly
+at `/config`, the desktop user's complete home. Documents, wallpaper, desktop
+settings, browser profiles, keyrings and Wine data persist automatically on the
+same host and desktop type. Browser sign-ins can expire and keyring unlock
+requirements still apply. There is no separate Chromium launcher or Documents
+connect/disconnect control. System packages installed in the container remain
+disposable; keeping an application's settings does not keep its system binaries.
 
-The companion's User storage tab connects a `/config/Documents` shortcut to the retained
-`Documents` directory. Disconnect restores an empty local Documents folder. Connecting replaces an empty
-local folder; existing local files must be moved first. Disconnect does not close
-open handles or remove the
-underlying mount. This is a desktop convenience, not an isolation boundary.
-FTP, GDrive, OneDrive, Dropbox, Mega, pCloud and ownCloud synchronization and
-user backend configuration remain future work.
+Profiles are separated by desktop type to avoid incompatible settings. The worker
+rejects a second non-deleted saved-profile session for the same owner/profile on this host.
+Session deletion preserves a saved profile. With `persistent: false`, the worker
+mounts a clean `state/sessions/<id>` at `/config` and deletes it after removing
+the container. The choice is immutable, included in snapshots and sync requests,
+and defaults to true. Disposable sessions never mount saved profiles. Storage browsing lists desktop-type
+folders at the owner root. Profiles contain sensitive data and executable startup
+configuration; manage account erasure, backups and quotas separately. Usage
+sampling includes the current profile and container layer, but is not a hard quota.
+A profile exceeding the sampled cutoff must be reduced before it can be reused.
 
-The opt-in Chromium launcher uses a separate retained user-data directory and
-`--password-store=basic` so ephemeral desktop keyrings do not prevent reuse.
-Treat the entire directory as sensitive: it contains history, cookies and site
-data without desktop keyring protection. Chromium must already be installed.
-Use the same Chromium version/profile across sessions; only one persistent
-browser may run per owner, enforced by flock. Close the browser normally before
-ending a session. Existing ephemeral profiles are not migrated; websites can
-revoke or expire authentication, including WhatsApp linked devices. Unchecking
-the option disables the launcher, but does not erase an existing saved profile.
-See Chromium's [user-data directory documentation](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md).
+There is no storage migration. End all old sessions before rollout. The new
+`profiles/` tree starts empty; the old `users/` tree is unused and can be removed
+by an operator after stopping old sessions and confirming its location. No
+runtime code automatically deletes retained user data. Existing containers must
+be recreated. Validate wallpaper, application settings, normal browser data and
+profile reuse across two fresh sessions for each rebuilt desktop type before
+rollout. Cloud/FTP synchronization and cross-host profile transfer remain future work.
 
 TCP details show public established sockets grouped by remote IP, with combined
 ports and a connection count. Private and local remote addresses are hidden.
@@ -196,7 +199,7 @@ numeric UID 1000 for guest operations. Image-specific reserved names fail startu
 A full desktop startup check for each rebuilt image is required before rollout.
 
 The authenticated portal calls `GET /agent/v1/storage` with the user's owner ID
-and relative `path` to browse `state/users/<owner>`, independently of session
+and relative `path` to browse `state/profiles/<owner>`, independently of session
 lifetime. `download: true` returns base64 content for regular files up to 16 MiB.
 Directory traversal, symlinks, hard links, and special files are rejected; folder
 listings are limited to fewer than 1,000 visible entries. The portal authorizes

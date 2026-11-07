@@ -103,6 +103,7 @@ Create with `PUT /agent/v1/desktops/<id>`:
   "owner": "11111111111111111111111111111111",
   "deadline": 2000000000,
   "profile": "ubuntu-kde",
+  "persistent": true,
   "linux_username": "alice",
   "full_name": "Alice Example",
   "hostname": "alice-desktop"
@@ -111,14 +112,16 @@ Create with `PUT /agent/v1/desktops/<id>`:
 
 Replace the illustrative deadline with current Unix seconds plus 900, 1800 or
 3600 as appropriate. It must be a future integer within `max_session_seconds`.
-The profile must be advertised by this host. Optional defaults are `ubuntu-kde`,
+The profile must be advertised by this host. `persistent` is an immutable JSON
+boolean, defaulting to true. False creates a clean session home that is removed
+on deletion, never mounting the saved profile. Optional defaults are `ubuntu-kde`,
 `abc`, empty full name and `ephemio`. Usernames match `[a-z_][a-z0-9_-]{0,31}`;
 `root` and `nobody` are rejected and images may reserve more names. Full names
 allow at most 100 UTF-8 bytes and exclude control characters and colons. Hostnames
 are lowercase letters/digits/hyphens, up to 63 characters, without edge hyphens.
 
 Creation returns 202 with session fields `id`, `owner`, `deadline`, `state`,
-`reason`, `profile`. Poll GET on the same path; do not assume 202 means ready.
+`reason`, `profile`, `persistent`. Poll GET on the same path; do not assume 202 means ready.
 States exposed by the worker are `provisioning`, `active`, `deleting`, `deleted`.
 Matching repeated PUT returns 200; differing identity, profile, owner or deadline
 returns 409. Companion extensions change the authoritative deadline: reconcile
@@ -127,7 +130,10 @@ that value before retrying the old specification. Deleted IDs cannot be reused.
 DELETE on the same path requests cleanup and returns the current session record.
 For a missing ID, send at least the original owner and deadline so the tombstone
 records the intended request. DELETE may return `deleting`; poll until `deleted`
-before declaring cleanup complete. Retained owner storage is not deleted.
+before declaring cleanup complete. The full home profile is not deleted. Profiles are stored per owner/desktop
+type/host; concurrent saved-profile sessions sharing one profile return 409. Disposable
+sessions use `state/sessions/<session-id>` and cleanup deletes that directory.
+Storage listings begin with desktop-type directories under the owner root.
 
 ## Endpoint reference
 

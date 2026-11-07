@@ -21,7 +21,7 @@ layout: the worker relies on the host Docker daemon, volume paths and bridge rul
 Allow headroom beyond each desktop's default 2 CPUs/3 GiB RAM. Admission requires
 5 GiB available RAM and 20 GiB free disk by default, with separate pressure
 thresholds. Image builds need additional RAM and disk. Reserve space for images,
-SQLite, disposable homes and retained owner files. Retained files currently have
+SQLite and retained home profiles. Retained files currently have
 no runtime quota; implement storage limits and retention operationally.
 
 Choose a host ID, an HTTPS host name and a portal/control origin under the same
@@ -158,7 +158,8 @@ Use the API guide to check health, create a 15-minute session and poll until
 active. Verify browser access from the configured portal origin, input, audio,
 clipboard, file transfer and companion actions. Test expiry while disconnected,
 pause/resume, grant revocation and explicit deletion. Confirm the owned container,
-home volume and network disappear after deletion while retained owner files stay.
+network disappear after deletion while the saved home profile stays. Check
+wallpaper and browser settings survive a new session of the same desktop type.
 Verify guest access to host/private networks is blocked and guest IPv6 is disabled.
 Reboot during a test session and verify recovery and the sweep timer. Existing
 unit tests mock Docker; passing them is not full installation acceptance.
