@@ -8,6 +8,7 @@ RUN if command -v apt-get >/dev/null; then \
       dnf install -y --setopt=install_weak_deps=False python3-qt5 qt5-qtwayland && dnf clean all; \
     fi
 COPY ephemio-tools.py /usr/local/lib/ephemio-tools.py
+COPY ephi.py /usr/local/lib/ephi.py
 COPY ephemio-status.py /usr/local/lib/ephemio-status.py
 COPY ephemio-status.desktop /etc/xdg/autostart/ephemio-status.desktop
 COPY ephemio-status.desktop /usr/share/applications/ephemio-status.desktop

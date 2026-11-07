@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Ephemio Session
-Comment=Session time, resource usage and controls
+Name=Ephi
+Comment=Your Ephemio companion
 Exec=/usr/bin/python3 /usr/local/lib/ephemio-status.py
 Icon=utilities-system-monitor
 Terminal=false

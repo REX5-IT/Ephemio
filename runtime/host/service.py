@@ -124,11 +124,50 @@ class Worker:
                 request.headers.get('Authorization', ''), 'Bearer ' + self.guest_token(sid)):
             raise web.HTTPForbidden()
         action = request.match_info['action']
-        if action not in ('status', 'extend', 'pause', 'terminate'):
+        if action not in ('status', 'extend', 'pause', 'terminate', 'inference'):
             raise web.HTTPNotFound()
         expected = 'GET' if action == 'status' else 'POST'
         if request.method != expected:
             raise web.HTTPMethodNotAllowed(request.method, [expected])
+        if action == 'inference':
+            if not self.active(self.get(sid)):
+                raise web.HTTPConflict(text='Session has ended.')
+            config = self.c.get('inference', {})
+            if not config.get('url') or not config.get('model'):
+                raise web.HTTPServiceUnavailable(text='Ephi inference is not configured on this host.')
+            data = await request.json()
+            messages = data.get('messages') if isinstance(data, dict) else None
+            if not isinstance(messages, list) or not messages or len(messages) > 100:
+                raise web.HTTPBadRequest(text='Invalid conversation.')
+            if any(not isinstance(m, dict) or m.get('role') not in ('system', 'user', 'assistant')
+                   or not isinstance(m.get('content'), str) for m in messages):
+                raise web.HTTPBadRequest(text='Invalid message.')
+            if not hasattr(self, '_inference_busy'):
+                self._inference_busy = set()
+            if sid in self._inference_busy or len(self._inference_busy) >= 2:
+                raise web.HTTPTooManyRequests(text='Inference is busy. Try again later.')
+            self._inference_busy.add(sid)
+            try:
+                headers = {'Authorization': 'Bearer ' + config['api_key']} if config.get('api_key') else {}
+                async with ClientSession(timeout=ClientTimeout(total=45)) as client:
+                    async with client.post(config['url'], headers=headers, allow_redirects=False,
+                                           json={'model': config['model'], 'messages': messages,
+                                                 'max_tokens': 2048, 'stream': False}) as response:
+                        if response.status != 200:
+                            raise web.HTTPBadGateway(text='Inference backend unavailable.')
+                        raw = bytearray()
+                        async for chunk in response.content.iter_chunked(16384):
+                            raw.extend(chunk)
+                            if len(raw) > 262144:
+                                raise web.HTTPBadGateway(text='Inference response too large.')
+                        if len(raw) > 262144:
+                            raise web.HTTPBadGateway(text='Inference response too large.')
+                        result = json.loads(raw)
+                if not self.active(self.get(sid)):
+                    raise web.HTTPConflict(text='Session has ended.')
+                return web.json_response({'content': result['choices'][0]['message']['content']})
+            finally:
+                self._inference_busy.discard(sid)
         async with self.lock:
             row = self.get(sid)
             if not self.active(row):
@@ -729,7 +768,7 @@ async def main():
         os.chmod(guest_dir, 0o755)
         guest_socket = guest_dir / 'api.sock'
         guest_socket.unlink(missing_ok=True)
-        guest_app = web.Application(middlewares=[errors], client_max_size=1024)
+        guest_app = web.Application(middlewares=[errors], client_max_size=262144)
         guest_app.router.add_route('*', '/guest/{sid}/{action}', worker.guest)
         guest_runner = web.AppRunner(guest_app, access_log=None)
         await guest_runner.setup()

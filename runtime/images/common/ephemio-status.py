@@ -20,14 +20,15 @@ class HostConnection(http.client.HTTPConnection):
         self.sock.connect('/run/ephemio-guest/api.sock')
 
 
-def call(action):
-    conn = HostConnection('localhost', timeout=25)
+def call(action, payload=None):
+    conn = HostConnection('localhost', timeout=50)
     try:
         conn.request('GET' if action == 'status' else 'POST',
                      '/guest/' + os.environ['EPHEMIO_SESSION_ID'] + '/' + action,
-                     headers={'Authorization': 'Bearer ' + os.environ['EPHEMIO_GUEST_TOKEN']})
+                     body=json.dumps(payload) if payload is not None else None,
+                     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ['EPHEMIO_GUEST_TOKEN']})
         response = conn.getresponse()
-        body = response.read(65536).decode()
+        body = response.read(262144).decode()
         if response.status != 200:
             raise RuntimeError(body or 'Host unavailable')
         return json.loads(body)
@@ -38,6 +39,10 @@ def call(action):
 spec = importlib.util.spec_from_file_location('ephemio_tools', Path(__file__).with_name('ephemio-tools.py'))
 tools = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tools)
+
+spec = importlib.util.spec_from_file_location('ephi', Path(__file__).with_name('ephi.py'))
+ephi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ephi)
 
 COLORS = {'cpu': '#9c8cff', 'memory': '#4cc9d9', 'disk': '#f3b86b', 'network': '#69d6a4'}
 
@@ -189,7 +194,7 @@ class Companion(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__(flags=QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
-        self.setWindowTitle('Ephemio session')
+        self.setWindowTitle('Ephi · Ephemio companion')
         self.setStyleSheet(STYLE)
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.local_pool = ThreadPoolExecutor(max_workers=1)
@@ -208,7 +213,7 @@ class Companion(QtWidgets.QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(14)
         header = QtWidgets.QHBoxLayout()
-        header.addWidget(label('ephemio', 'brand'))
+        header.addWidget(label('Ephi · ephemio', 'brand'))
         header.addStretch()
         self.status = label('Connecting', 'status')
         header.addWidget(self.status)
@@ -252,6 +257,9 @@ class Companion(QtWidgets.QWidget):
         show_tcp.clicked.connect(self.show_connections)
         grid.addWidget(show_tcp, 4, 0, 1, 2)
         self.tabs.addTab(overview, 'Overview')
+        self.ephi = ephi.Panel(call, self)
+        self.tabs.insertTab(0, self.ephi, 'Ephi')
+        self.tabs.setCurrentIndex(0)
         storage_page = QtWidgets.QWidget()
         storage_layout = QtWidgets.QVBoxLayout(storage_page)
         self.user_storage = label('▣  User storage', 'brand')

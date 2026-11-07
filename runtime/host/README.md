@@ -205,3 +205,39 @@ Directory traversal, symlinks, hard links, and special files are rejected; folde
 listings are limited to fewer than 1,000 visible entries. The portal authorizes
 host selection against the signed-in user's desktop history. This API does not
 modify user files.
+
+### Ephi inference
+
+Ephi is the desktop companion's task agent. Configure the worker's JSON configuration
+with an `inference` object to enable it:
+
+```json
+{"inference": {"url": "http://127.0.0.1:8080/v1/chat/completions", "model": "your-model"}}
+```
+
+The endpoint must implement non-streaming OpenAI-compatible chat completions and
+follow JSON action instructions. An optional `api_key` stays on the host. The
+URL is administrator configured; guests cannot select an upstream. No OpenAI SDK
+is required. Bind the inference engine to a host-private interface.
+
+The authenticated guest endpoint `POST /guest/<id>/inference` accepts `messages`
+and returns `content`. It limits request/response size, output tokens, request
+duration, and concurrent requests (one per session, two per worker). Inference
+runs outside the session lifecycle lock. In-flight inference may run until its
+45-second timeout after cancellation or session deletion; results for ended
+sessions are discarded.
+
+Users supply a task and maximum task duration (1–480 minutes), and optionally
+select termination on successful completion. Ephi runs up to 40 command steps,
+with a 60-second limit per command, and extends sessions near expiry subject to
+host limits. Cancellation and task expiry stop further actions; they do not
+terminate the desktop. Extensions use the existing 15-minute API, so the desktop
+expiry can exceed the task budget. Inference failures stop the task without
+terminating the desktop. Completion is model-reported, not a proof of success.
+
+Commands execute as the desktop user and can access that user's files and network.
+This is not an isolation boundary against other processes in the same guest.
+The transcript is in-memory and is lost when the desktop ends; use saved profiles
+and instruct Ephi to save deliverables before automatic termination. Rebuild the
+common image layer and restart the worker to deploy. Browser/GUI automation and
+interactive follow-up questions are not included in this initial version.
