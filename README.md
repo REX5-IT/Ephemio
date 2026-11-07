@@ -1,11 +1,24 @@
 # Ephemio
 
-Ephemeral desktops as a service.
+MIT-licensed runtime for ephemeral Linux desktops in the browser.
+
+Ephemio is a product of [REX5](https://rex5.com/).
 
 The Ephemio POC lets invited users launch a fresh Linux desktop in their browser,
-use it for a limited session, and discard it when they are done. Files, browser state,
-and installed software belong to that session. Users download anything they
-want to keep before the desktop expires.
+use it for a limited session, and discard it when they are done. Installed software
+and ordinary desktop files belong to that session. Optional retained user storage
+and an opt-in persistent Chromium profile can preserve selected data on the same
+host. Download anything else you want to keep before the desktop expires.
+
+This repository contains the host runtime, desktop image definitions, companion
+app and deployment templates. The PHP customer/admin portal is maintained
+separately; this checkout is not a complete self-hosted service. Ephemio is
+licensed under the [MIT License](LICENSE).
+
+For individuals and companies who want hosted desktops, [Ephemio](https://ephemio.com/)
+is the managed service. Its website, customer accounts and commercial service
+features are maintained in the separate website repository. Billing and company
+management are not included in this runtime.
 
 ## Product direction
 
@@ -30,20 +43,26 @@ retired from this repository. They are not the specification for this service.
 
 | Component | Status |
 | --- | --- |
-| Ubuntu KDE desktop and browser streaming | Supplied by LinuxServer Webtop, also used by the sibling PDWSLC project |
+| Desktop profiles and browser streaming | Ubuntu KDE, Ubuntu GNOME, Fedora GNOME and Mint Cinnamon, using Webtop/Selkies |
 | Native Linux deployment | Docker Compose prototype with CPU/RAM limits and local HTTPS access |
 | Optional Intel/AMD GPU access | Compose overlay supplied; hardware validation pending |
-| Customer dashboard and sign-in | Deployed on Hostinger; invited accounts, setup/reset mail and login |
-| Session provisioning, expiry, and verified cleanup | Implemented on host-0002 with a durable worker and fallback timer |
-| Authenticated desktop gateway | Deployed with expiring tickets, browser grants and stream revocation |
+| Customer dashboard and sign-in | External PHP portal; not included in this repository |
+| Session provisioning, expiry, and verified cleanup | Durable host worker, SQLite state, recovery and fallback timer |
+| Authenticated desktop gateway | Signed host API, single-use tickets, session-bound browser grants and periodic WebSocket authorization |
+| Desktop companion | Countdown, resource usage, extensions, pause, termination and public TCP connection details |
+| Retained user storage | Per-owner, per-host bind mount, Documents shortcut and read-only storage browsing API |
+| Persistent Chromium | Opt-in retained browser profile; requires Chromium and stores sensitive browser data without desktop keyring protection |
+| Applications | Session-local VLC, GIMP, LibreOffice and FileZilla catalog; KDE image adds Wine for compatible Windows applications |
+| Identity and host administration | Session username/full name/hostname; host settings, usage inspection, pause/resume and thumbnails |
 | Customer isolation | POC bridge filtering and container limits; public multi-tenant isolation pending |
 | Usage accounting and billing | Planned |
 
-The hosted POC is at [ephemio.com](https://ephemio.com/). The first host admits
-one desktop at a time. Browser streaming, audio signal delivery, keyboard input,
-clipboard, file transfer, grant renewal and logout revocation have been checked.
-See the [deployment report](docs/DEPLOYMENT.md) and [host service](runtime/host/README.md).
-Concurrent capacity and subjective video/audio smoothness require further measurement.
+The project website is [ephemio.com](https://ephemio.com/). The historical
+[deployment report](docs/DEPLOYMENT.md) records checks on the initial one-slot
+host; it does not establish current live configuration or validate newer images.
+See [host operations](runtime/host/README.md) and [desktop image builds](runtime/images/README.md)
+for configuration and validation requirements. Concurrent capacity and sustained
+video/audio performance require further measurement.
 
 ## Try the desktop prototype
 
@@ -66,12 +85,14 @@ docker compose -p ephemio-desktop-test down --volumes
 
 ## Service architecture
 
-Webtop supplies the desktop and streaming. The Ephemio POC supplies the surrounding
-service: accounts, launch/reconnect/end controls, session lifetimes, access
-routing, resource allocation, and cleanup. Usage accounting is a later milestone.
+Webtop supplies the desktop and streaming. This runtime supplies provisioning,
+session lifetimes, authenticated access routing, resource allocation and cleanup.
+The separate portal supplies customer accounts and launch/reconnect/end controls.
+Usage accounting is a later milestone.
 
-The initial target is one Ubuntu KDE desktop option on a native Linux host.
-The PHP portal allocates a separate environment and storage for each session.
+Configured hosts advertise their supported desktop profiles and capacity.
+The external PHP portal requests a separate environment and disposable home
+storage for each session, while the worker mounts retained storage for its owner.
 An authenticated HTTPS gateway routes each tester to their own active desktop.
 The host worker provisions environments and enforces expiry independently of
 the browser connection. The host registry supports additional configured hosts.
@@ -83,7 +104,8 @@ requested -> provisioning -> active -> deleting -> deleted
 ```
 
 Provisioning failures also enter cleanup. `deleted` means the environment and
-its session storage have been observed removed. Failed cleanup must remain
+its disposable session storage have been observed removed. Retained owner storage
+is preserved and requires a separate retention/account-deletion policy. Failed cleanup must remain
 visible and be retried after worker or host restarts. Access must be revoked
 when a session ends, even if storage cleanup is still in progress.
 
@@ -91,6 +113,17 @@ Before public customer access, the service needs an isolation design for
 untrusted desktop users, tenant network separation, resource and disk quotas,
 and tested cleanup behavior. The current Docker Compose setup is a host
 evaluation tool and does not establish those guarantees.
+
+The [security review](docs/SECURITY_REVIEW.md) records open findings, including
+unbounded retained storage, missing firewall startup enforcement, ongoing HTTP
+responses after grant revocation and lifecycle delays during guest metrics work.
+
+## Development checks
+
+Use a Python virtual environment to install `runtime/host/requirements.txt`, then
+run `python runtime/host/tests/test_security.py`. These tests cover host API and
+guest authorization behavior with mocked Docker operations. Full desktop startup,
+network isolation and portal integration require separate environment checks.
 
 ## Next milestones
 
