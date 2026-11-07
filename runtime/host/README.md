@@ -1,5 +1,9 @@
 # Ephemio host service
 
+Start with the [fresh-host installation guide](../../docs/INSTALLATION.md) for a
+new machine and the [host API reference](../../docs/HOST_API.md) for control-plane
+integration. The root deployment scripts update existing installations.
+
 The deployed POC runs Python 3.12 and aiohttp 3.14.3. `service.py` has four roles:
 
 - `worker`: private Unix-socket API, Docker lifecycle, durable SQLite state and expiry.
@@ -129,11 +133,11 @@ Browser access has no independent five-minute timeout. Grants follow the desktop
 session deadline, and companion extensions update existing grants atomically.
 The Secure, HttpOnly, SameSite=Strict cookie lasts for the browser session; the
 worker enforces expiry and revocation, including on active WebSocket streams.
-Existing short-lived grant records are aligned to their desktop deadlines on
-worker startup. After deploying, reopen the desktop from Ephemio once to replace
-any cookie previously issued with a five-minute Max-Age. No image rebuild is
-required for this browser-access change. Legacy portal renewal still works but
-is unnecessary. Logout revocation still requires delivery to the host.
+Each ticket exchange issues a fresh grant; there is no background browser renewal.
+Startup preserves stored grant expiry values. Reopen the desktop from Ephemio if
+an older grant or cookie expires. Logout revocation still requires delivery to
+the host. Deploy the website without its renewal timer before updating the host;
+reload already-open dashboard pages so cached scripts stop sending renewal requests.
 
 ### Companion storage and applications
 

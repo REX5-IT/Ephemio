@@ -140,12 +140,12 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
         await self.client.post('/v1/grants/revoke', json={'login': self.login})
         self.assertEqual((await self.client.post('/v1/authorize', json={'token': grant['token'], 'id': self.sid})).status, 403)
 
-    async def test_renewal_preserves_stream_token_and_fixed_deadline(self):
+    async def test_new_connection_issues_distinct_token_and_fixed_deadline(self):
         result = await self.client.post('/v1/consume', json={'ticket': await self.ticket()})
         original = await result.json()
         renewed = await self.client.post('/v1/consume', json={'ticket': await self.ticket(), 'existing': original['token']})
         renewed = await renewed.json()
-        self.assertEqual(renewed['token'], original['token'])
+        self.assertNotEqual(renewed['token'], original['token'])
         self.assertEqual(renewed['expires'], self.deadline)
         self.worker.save('UPDATE desktops SET deadline=? WHERE id=?', (int(time.time()) - 1, self.sid))
         self.assertEqual((await self.client.post('/v1/authorize', json={'token': original['token'], 'id': self.sid})).status, 403)
@@ -164,13 +164,16 @@ class WorkerAuthorization(unittest.IsolatedAsyncioTestCase):
             result = await self.client.post('/v1/authorize', json={'id': self.sid, 'token': grant['token']})
             self.assertEqual(result.status, 403)
 
-    async def test_existing_short_grants_follow_deadline_after_restart(self):
+    async def test_restart_preserves_expired_grant_deadline(self):
         grant = await (await self.client.post('/v1/consume', json={'ticket': await self.ticket()})).json()
-        self.worker.save('UPDATE grants SET expires=?', (int(time.time()) - 1,))
+        expired = int(time.time()) - 1
+        self.worker.save('UPDATE grants SET expires=?', (expired,))
         restarted = service.Worker(self.worker.c)
         try:
             row = restarted.db.execute('SELECT * FROM grants WHERE hash=?', (service.digest(grant['token']),)).fetchone()
-            self.assertEqual(row['expires'], self.deadline)
+            self.assertEqual(row['expires'], expired)
+            response = await self.client.post('/v1/authorize', json={'id': self.sid, 'token': grant['token']})
+            self.assertEqual(response.status, 403)
         finally:
             restarted.db.close()
 
@@ -281,7 +284,7 @@ class GuestAuthorization(unittest.IsolatedAsyncioTestCase):
 
 
 class GatewaySignatures(unittest.IsolatedAsyncioTestCase):
-    async def test_connect_portal_aliases_and_renewal_origin(self):
+    async def test_connect_portal_origins(self):
         with tempfile.TemporaryDirectory() as directory:
             origins = ['https://ephemio.com', 'https://www.ephemio.com']
             gateway = service.Gateway({'gateway_state': directory, 'portal_url': origins[0], 'portal_origins': origins})
@@ -299,9 +302,8 @@ class GatewaySignatures(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(cookie['secure'])
                     self.assertTrue(cookie['httponly'])
                     self.assertEqual(cookie['samesite'], 'Strict')
-                    renewed = await client.post('/connect', headers={'Origin': origin}, data={'ticket': 'test', 'renew': '1'})
-                    self.assertEqual(renewed.status, 200)
-                    self.assertIn('parent.postMessage({renewed:true},' + json.dumps(origin) + ')', await renewed.text())
+                    renewed = await client.post('/connect', headers={'Origin': origin}, data={'ticket': 'test', 'renew': '1'}, allow_redirects=False)
+                    self.assertEqual(renewed.status, 303)
                 calls = gateway.call.await_count
                 for origin in [None, 'null', 'http://www.ephemio.com', 'https://evil.ephemio.com', 'https://www.ephemio.com.evil.example']:
                     headers = {'Origin': origin} if origin is not None else {}

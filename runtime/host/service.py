@@ -71,10 +71,6 @@ class Worker:
         CREATE TABLE IF NOT EXISTS grants (
           hash TEXT PRIMARY KEY, desktop TEXT NOT NULL, login TEXT NOT NULL, expires INTEGER NOT NULL);
         ''')
-        # Existing browser grants now follow the desktop lifetime as well.
-        self.db.execute('''UPDATE grants SET expires=(SELECT deadline FROM desktops WHERE desktops.id=grants.desktop)
-                           WHERE EXISTS (SELECT 1 FROM desktops WHERE desktops.id=grants.desktop)''')
-        self.db.commit()
         if 'profile' not in {r['name'] for r in self.db.execute('PRAGMA table_info(desktops)')}:
             self.save("ALTER TABLE desktops ADD COLUMN profile TEXT NOT NULL DEFAULT 'ubuntu-kde'")
         for column, definition in [('linux_username', "TEXT NOT NULL DEFAULT 'abc'"), ('full_name', "TEXT NOT NULL DEFAULT ''"), ('hostname', "TEXT NOT NULL DEFAULT 'ephemio'")]:
@@ -264,10 +260,7 @@ class Worker:
             ticket = self.db.execute('SELECT * FROM tickets WHERE hash=?', (hashed,)).fetchone()
             if not ticket or ticket['expires'] <= time.time() or not self.active(self.get(ticket['desktop'])):
                 raise web.HTTPForbidden(text='Connection ticket is invalid or expired.')
-            token = str(data.get('existing', ''))
-            existing = self.db.execute('SELECT * FROM grants WHERE hash=?', (digest(token),)).fetchone()
-            if not existing or existing['desktop'] != ticket['desktop'] or existing['login'] != ticket['login'] or existing['expires'] <= time.time():
-                token = secrets.token_urlsafe(32)
+            token = secrets.token_urlsafe(32)
             deadline = self.get(ticket['desktop'])['deadline']
             expires = deadline
             with self.db:
@@ -572,12 +565,8 @@ class Gateway:
         if origin not in self.c.get('portal_origins', [self.c['portal_url']]):
             raise web.HTTPForbidden()
         data = await request.post()
-        grant, _ = await self.call('POST', '/v1/consume', {'ticket': data.get('ticket', ''), 'existing': request.cookies.get(COOKIE, '')})
-        if data.get('renew') == '1':
-            # Exact-origin messaging lets the portal renew without navigating the desktop.
-            result = web.Response(text='<script>parent.postMessage({renewed:true},' + json.dumps(origin) + ')</script>', content_type='text/html')
-        else:
-            result = web.HTTPSeeOther('/desktop/' + grant['id'] + '/')
+        grant, _ = await self.call('POST', '/v1/consume', {'ticket': data.get('ticket', '')})
+        result = web.HTTPSeeOther('/desktop/' + grant['id'] + '/')
         # A browser-session cookie survives desktop extensions; the worker enforces
         # the current deadline and revocation on every request and active stream.
         result.set_cookie(COOKIE, grant['token'], secure=True, httponly=True, samesite='Strict', path='/')

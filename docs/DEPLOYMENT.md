@@ -137,7 +137,7 @@ the sibling website checkout were preserved locally.
 
 Runtime source is in this repository's `runtime/host/`. Portal source is in
 `../ephemio-website/desktop-service/`. The website's root `deploy.sh` now delegates
-to the new portal deployment, avoiding redeployment of the retired agent site.
+to the desktop portal deployment.
 Normal deployment does not reset the database. Neither repository was committed
 or pushed.
 

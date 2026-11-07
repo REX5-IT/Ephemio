@@ -36,9 +36,6 @@ an active session. The service must keep showing the expiry time and enforce
 it on the server, even if the user disconnects. The POC offers 15, 30, or 60
 minutes. Idle timeout, resource tiers, and pricing remain to be decided.
 
-The previous AI-agent workspace concept and its preview workload API are
-retired from this repository. They are not the specification for this service.
-
 ## Current implementation
 
 | Component | Status |
@@ -63,6 +60,17 @@ host; it does not establish current live configuration or validate newer images.
 See [host operations](runtime/host/README.md) and [desktop image builds](runtime/images/README.md)
 for configuration and validation requirements. Concurrent capacity and sustained
 video/audio performance require further measurement.
+
+## Self-hosting and support
+
+For a fresh host, follow the [manual installation guide](docs/INSTALLATION.md).
+It targets experienced Linux operators and covers image builds, host permissions,
+network policy, TLS and acceptance checks. The [host API reference](docs/HOST_API.md)
+documents standalone operation and integration with your own control plane.
+
+For official installation, integration and operational support, contact
+[REX5](https://rex5.com/). The [managed Ephemio service](https://ephemio.com/)
+is available for users who prefer hosted infrastructure.
 
 ## Try the desktop prototype
 

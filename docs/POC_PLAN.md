@@ -40,7 +40,7 @@ contains the old application, `.env`, and a separate legacy JSON configuration.
 Database connectivity and schema have not been verified in this inspection.
 The sibling `../ephemio-website` repository contains the old PHP implementation,
 including identity, CSRF, rate limiting, and database helpers. Review these as
-reuse candidates; the retired workload/agent API is not the new service contract.
+reuse candidates for the desktop service.
 
 ## Architecture
 
@@ -95,7 +95,7 @@ permissions. The web root contains only public PHP entry points and assets.
 6. Browser access lasts until the desktop deadline, including extensions, or
    explicit revocation. The host-only cookie is a browser-session cookie;
    periodic renewal is unnecessary. Fresh single-use connection tickets remain
-   short-lived. Existing portal renewal requests are supported for compatibility.
+   short-lived. Each connection receives a fresh grant.
 7. End, expiry, logout, and account disabling revoke access. The gateway checks
    active WebSockets every two seconds and closes them on revocation or expiry.
    Logout revocation depends on delivery to the host; if the host cannot receive
