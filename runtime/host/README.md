@@ -4,7 +4,7 @@ Start with the [fresh-host installation guide](../../docs/INSTALLATION.md) for a
 new machine and the [host API reference](../../docs/HOST_API.md) for control-plane
 integration. The root deployment scripts update existing installations.
 
-The deployed POC runs Python 3.12 and aiohttp 3.14.3. `service.py` has four roles:
+The deployed POC runs Python 3.12 and aiohttp 3.14.4. `service.py` has four roles:
 
 - `worker`: private Unix-socket API, Docker lifecycle, durable SQLite state and expiry.
 - `gateway`: signed host API, single-use ticket exchange and authorized HTTP/WebSocket proxy.

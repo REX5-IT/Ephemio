@@ -133,6 +133,10 @@ run `python runtime/host/tests/test_security.py`. These tests cover host API and
 guest authorization behavior with mocked Docker operations. Full desktop startup,
 network isolation and portal integration require separate environment checks.
 
+Pull requests run a read-only GitHub security workflow that audits host Python
+dependencies with `pip-audit` and runs the security regression tests. Findings
+fail the check; container images and operating-system packages are outside this scan.
+
 ## Next milestones
 
 The [POC implementation plan](docs/POC_PLAN.md) and [deployment report](docs/DEPLOYMENT.md)
